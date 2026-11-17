@@ -16,9 +16,10 @@
  * @module dsh-marketplace-adapter
  */
 
+import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -85,57 +86,162 @@ export const inject = ['skills'];
  * @param config - the row's `config` object; see {@link normalizeConfig}.
  */
 export function apply(ctx, config = {}) {
-  const { marketplaces } = normalizeBundleConfig(config);
-  const providers = marketplaces.map((entry) => {
-    let provider;
-    ctx.skills.registerProvider((control) => {
-      provider = new MarketplaceAdapterProvider(ctx, entry, control);
-      return provider;
-    });
-    return provider;
-  });
+  const rawConfig = { ...config };
+  const { marketplaces: declared } = normalizeBundleConfig(rawConfig);
+  const storePath = declared[0].storePath;
+  const mounted = [];
+  const state = { providers: [], declared, storePath, refresh };
 
-  registerMarketplaceCommand(ctx, providers);
-  for (const provider of providers) provider.start();
+  const initial = storedEntriesSync(ctx, storePath, rawConfig);
+  mount(mergeMarketplaceSources(declared, initial.entries, initial.removed));
+  registerMarketplaceCommand(ctx, state);
+  for (const provider of state.providers) provider.start();
+
+  function mount(entries) {
+    for (const entry of entries) {
+      let provider;
+      const disposer = ctx.skills.registerProvider((control) => {
+        provider = new MarketplaceAdapterProvider(ctx, entry, control);
+        return provider;
+      });
+      mounted.push({ disposer, provider });
+    }
+    state.providers = mounted.map((item) => item.provider);
+    return state.providers;
+  }
+
+  function unmountAll() {
+    for (const item of mounted.splice(0)) {
+      try {
+        item.disposer?.();
+      } catch (error) {
+        ctx.logger.warn(`marketplace-adapter: could not unload ${item.provider?.config?.name}: ${message(error)}`);
+      }
+    }
+    state.providers = [];
+  }
+
+  /**
+   * Rebuild the provider set from the declared entries plus the store the UI
+   * writes. A changed marketplace is a different provider, because the skill
+   * registry owns provider identity for the life of a registration.
+   */
+  async function refresh() {
+    const { marketplaces: stored, removed } = await readMarketplaceStore(storePath);
+    const storedEntries = stored.length === 0 ? [] : normalizeBundleConfig({ ...rawConfig, marketplaces: stored }).marketplaces;
+    unmountAll();
+    mount(mergeMarketplaceSources(declared, storedEntries, removed));
+    for (const provider of state.providers) provider.start();
+    return state.providers;
+  }
+}
+
+const MARKETPLACE_USAGE = 'usage: /marketplace [sync [name] | add <owner/repo> [name] | remove <name>]';
+
+function storedEntriesSync(ctx, storePath, rawConfig) {
+  try {
+    const { marketplaces: stored, removed } = readMarketplaceStoreSync(storePath);
+    const entries = stored.length === 0 ? [] : normalizeBundleConfig({ ...rawConfig, marketplaces: stored }).marketplaces;
+    return { entries, removed };
+  } catch (error) {
+    ctx.logger.warn(`marketplace-adapter: stored marketplaces ignored: ${message(error)}`);
+    return { entries: [], removed: [] };
+  }
 }
 
 /**
- * `/marketplace` is the human-facing read of the same state each provider keeps:
- * which repository is adapted, which revision it is on, when it last refreshed,
- * and which packages and versions it serves. The settings UI calls the same
- * command once it exists.
+ * One operation for both callers: the composer command and the settings tab run
+ * the same handler, so the UI never reimplements what the command does.
  */
-function registerMarketplaceCommand(ctx, providers) {
+function registerMarketplaceCommand(ctx, state) {
   const commands = ctx.get('commands');
   if (commands === undefined) return;
 
   commands.register({
     name: 'marketplace',
-    description: 'List the adapted marketplaces with their packages, versions and last refresh',
-    input: { hint: '[sync [name]]' },
+    description: 'List, add, remove or resync the adapted marketplaces',
+    input: { hint: '[sync [name] | add <owner/repo> [name] | remove <name>]' },
     async handler(invocation) {
-      const [action, name] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
-
-      if (action === 'sync') {
-        const targets = name === undefined ? providers : providers.filter((provider) => provider.config.name === name);
-        if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${name}"` };
-        await Promise.all(targets.map((provider) => provider.runSync()));
-      } else if (action !== undefined) {
-        return { kind: 'error', text: 'usage: /marketplace [sync [name]]' };
-      }
+      const [action, first, second] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
 
       try {
-        const blocks = [];
-        for (const provider of providers) {
-          const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
-          blocks.push(renderMarketplace(provider, packages, complete));
+        if (action === 'add') {
+          if (first === undefined) return { kind: 'error', text: 'usage: /marketplace add <owner/repo> [name]' };
+          return await addMarketplace(state, first, second);
         }
-        return { kind: 'success', text: blocks.join('\n\n') };
+        if (action === 'remove') {
+          if (first === undefined) return { kind: 'error', text: 'usage: /marketplace remove <name>' };
+          return await removeMarketplace(state, first);
+        }
+        if (action === 'sync') {
+          const targets = first === undefined ? state.providers : state.providers.filter((provider) => provider.config.name === first);
+          if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${first}"` };
+          await Promise.all(targets.map((provider) => provider.runSync()));
+          return { kind: 'success', text: await statusText(state) };
+        }
+        if (action !== undefined) return { kind: 'error', text: MARKETPLACE_USAGE };
+
+        return { kind: 'success', text: await statusText(state) };
       } catch (error) {
         return { kind: 'error', text: `marketplace: ${message(error)}` };
       }
     },
   });
+}
+
+async function statusText(state) {
+  const blocks = [];
+  for (const provider of state.providers) {
+    const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
+    const origin = state.declared.some((entry) => entry.name === provider.config.name) ? 'cordis.patch.yml' : 'ui';
+    blocks.push(`${renderMarketplace(provider, packages, complete)}\norigin       ${origin}`);
+  }
+  return blocks.join('\n\n');
+}
+
+async function addMarketplace(state, repository, name) {
+  const normalized = normalizeBundleConfig({ marketplaces: [{ repository, ...(name === undefined ? {} : { name }) }] }).marketplaces[0];
+  const { marketplaces: stored, removed } = await readMarketplaceStore(state.storePath);
+  const declared = state.declared.some((entry) => entry.name === normalized.name);
+
+  if (declared) {
+    if (!removed.includes(normalized.name)) {
+      return { kind: 'error', text: `marketplace: "${normalized.name}" already exists` };
+    }
+    await writeMarketplaceStore(state.storePath, stored, removed.filter((item) => item !== normalized.name));
+    await state.refresh();
+    return { kind: 'success', text: `restored ${normalized.name}\n\n${await statusText(state)}` };
+  }
+
+  if (state.providers.some((provider) => provider.config.name === normalized.name)) {
+    return { kind: 'error', text: `marketplace: "${normalized.name}" already exists` };
+  }
+
+  await writeMarketplaceStore(
+    state.storePath,
+    [...stored, { name: normalized.name, repository: normalized.repository, ref: normalized.ref }],
+    removed.filter((item) => item !== normalized.name),
+  );
+  await state.refresh();
+  return { kind: 'success', text: `added ${normalized.name} (${normalized.repository})\n\n${await statusText(state)}` };
+}
+
+async function removeMarketplace(state, name) {
+  const { marketplaces: stored, removed } = await readMarketplaceStore(state.storePath);
+
+  if (state.declared.some((entry) => entry.name === name)) {
+    if (removed.includes(name)) return { kind: 'error', text: `marketplace: "${name}" is already removed` };
+    await writeMarketplaceStore(state.storePath, stored, [...removed, name]);
+    await state.refresh();
+    return { kind: 'success', text: `removed ${name} (declared in cordis.patch.yml; add it again to restore)\n\n${await statusText(state)}` };
+  }
+
+  const next = stored.filter((entry) => entry.name !== name && marketplaceName(String(entry.repository)) !== name);
+  if (next.length === stored.length) return { kind: 'error', text: `marketplace: no stored marketplace named "${name}"` };
+
+  await writeMarketplaceStore(state.storePath, next, removed);
+  await state.refresh();
+  return { kind: 'success', text: `removed ${name}\n\n${await statusText(state)}` };
 }
 
 function renderMarketplace(provider, packages, complete) {
@@ -197,6 +303,7 @@ export function normalizeConfig(raw = {}) {
     repository,
     ref,
     mirrorPath,
+    storePath: resolve(optionalString(raw.storePath) ?? defaultStorePath()),
     namespace,
     providerName,
     sslBackend,
@@ -219,8 +326,7 @@ export function normalizeConfig(raw = {}) {
  * other value untouched so SSH and self-hosted URLs still work.
  * @param value - the configured repository.
  * @returns a Git URL.
- */
-export function normalizeRepository(value) {
+ */export function normalizeRepository(value) {
   const text = String(value).trim();
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}.git` : text;
 }
@@ -352,6 +458,87 @@ export function defaultMirrorPath(repository) {
     .join('-');
   const slug = tail.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
   return join(home, 'skill-mirrors', slug === '' ? 'skills' : slug);
+}
+
+/**
+ * `$DSH_HOME/marketplace-adapter/marketplaces.json` — the list the settings UI
+ * owns. It is separate from the profile patch: that file belongs to the user and
+ * other bundles, and a plugin must not rewrite it to store its own data.
+ * @returns the default store path.
+ */
+export function defaultStorePath() {
+  const home = optionalString(process.env.DSH_HOME) ?? join(homedir(), '.dsh');
+  return join(home, 'marketplace-adapter', 'marketplaces.json');
+}
+
+function plainEntries(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry) => entry !== null && typeof entry === 'object' && !Array.isArray(entry));
+}
+
+/**
+ * Read the UI-managed list. A missing or unreadable file is an empty list: a
+ * broken store must never take the declared marketplaces down with it.
+ * @param path - the store path.
+ * @returns the stored entries.
+ */
+export async function readMarketplaceStore(path) {
+  let text;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    if (isAbsent(error)) return { marketplaces: [], removed: [] };
+    throw error;
+  }
+  return parseMarketplaceStore(text);
+}
+
+/** Activation-time read; the store is tiny and must be applied before the first catalog. */
+export function readMarketplaceStoreSync(path) {
+  try {
+    return parseMarketplaceStore(readFileSync(path, 'utf8'));
+  } catch {
+    return { marketplaces: [], removed: [] };
+  }
+}
+
+function parseMarketplaceStore(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const removed = Array.isArray(parsed?.removed) ? parsed.removed.filter((name) => typeof name === 'string') : [];
+    return { marketplaces: plainEntries(parsed?.marketplaces), removed };
+  } catch {
+    return { marketplaces: [], removed: [] };
+  }
+}
+
+/** Replace the store atomically, so an interrupted write cannot truncate it. */
+export async function writeMarketplaceStore(path, marketplaces, removed = []) {
+  await mkdir(dirname(path), { recursive: true });
+  const temp = `${path}.tmp`;
+  await writeFile(temp, `${JSON.stringify({ version: 1, marketplaces, removed }, null, 2)}\n`, 'utf8');
+  await rename(temp, path);
+}
+
+/**
+ * Declared entries win over stored ones, and a tombstone removes a declared
+ * entry without editing the profile patch: that file belongs to the user.
+ */
+export function mergeMarketplaceSources(declared, stored, removed = []) {
+  const dropped = new Set(removed);
+  const names = new Set();
+  const merged = [];
+  for (const entry of declared) {
+    if (dropped.has(entry.name)) continue;
+    names.add(entry.name);
+    merged.push(entry);
+  }
+  for (const entry of stored) {
+    if (names.has(entry.name) || dropped.has(entry.name)) continue;
+    names.add(entry.name);
+    merged.push(entry);
+  }
+  return merged;
 }
 
 /* -------------------------------------------------------------------------- */

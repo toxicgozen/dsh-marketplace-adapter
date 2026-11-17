@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -58,7 +58,7 @@ test('apply registers a marketplace command that reports repository, version and
 
     assert.equal(definitions.length, 1);
     assert.equal(definitions[0].name, 'marketplace');
-    assert.equal(definitions[0].input.hint, '[sync [name]]');
+    assert.equal(definitions[0].input.hint, '[sync [name] | add <owner/repo> [name] | remove <name>]');
 
     const result = await definitions[0].handler({
       commandId: 1,
@@ -92,7 +92,7 @@ test('the command rejects unknown input instead of syncing', async () => {
     const result = await definitions[0].handler({
       commandId: 1,
       agent: { id: 'session' },
-      rawInput: 'remove everything',
+      rawInput: 'frobnicate',
       attachments: [],
       signal: new AbortController().signal,
     });
@@ -101,6 +101,76 @@ test('the command rejects unknown input instead of syncing', async () => {
     assert.match(result.text, /usage: \/marketplace/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('add and remove write the store the UI owns, and the list survives a restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-marketplace-'));
+  const store = await mkdtemp(join(tmpdir(), 'dsh-marketplace-store-'));
+  const storePath = join(store, 'marketplaces.json');
+  try {
+    await fixture(root);
+    const definitions = [];
+    const providers = [];
+    const ctx = {
+      logger: { info() {}, warn() {} },
+      get: () => ({ register: (definition) => definitions.push(definition) }),
+      skills: {
+        registerProvider(factory) {
+          providers.push(factory({ signal: new AbortController().signal, invalidate() {} }));
+          return () => {};
+        },
+      },
+    };
+
+    apply(ctx, { mirrorPath: root, storePath, syncOnApply: false });
+    const call = (rawInput) =>
+      definitions[0].handler({ commandId: 1, agent: { id: 'session' }, rawInput, attachments: [], signal: new AbortController().signal });
+
+    const added = await call('add example/two work');
+    assert.equal(added.kind, 'success');
+    assert.match(added.text, /added work/);
+    assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')), {
+      version: 1,
+      marketplaces: [{ name: 'work', repository: 'https://github.com/example/two.git', ref: 'main' }],
+      removed: [],
+    });
+    assert.deepEqual(providers.slice(-2).map((provider) => provider.name), ['toxicgozen-skills', 'work']);
+
+    const dropped = await call('remove toxicgozen-skills');
+    assert.equal(dropped.kind, 'success');
+    assert.deepEqual(providers.slice(-1).map((provider) => provider.name), ['work']);
+    assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')).removed, ['toxicgozen-skills']);
+
+    const restored = await call('add toxicgozen/skills');
+    assert.equal(restored.kind, 'success');
+    assert.match(restored.text, /restored toxicgozen-skills/);
+    assert.deepEqual(providers.slice(-2).map((provider) => provider.name), ['toxicgozen-skills', 'work']);
+    assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')).removed, []);
+
+    const removed = await call('remove work');
+    assert.equal(removed.kind, 'success');
+    assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')).marketplaces, []);
+
+    await call('add example/three three');
+    const restarted = [];
+    apply(
+      {
+        logger: { info() {}, warn() {} },
+        get: () => ({ register: () => () => {} }),
+        skills: {
+          registerProvider(factory) {
+            restarted.push(factory({ signal: new AbortController().signal, invalidate() {} }));
+            return () => {};
+          },
+        },
+      },
+      { mirrorPath: root, storePath, syncOnApply: false },
+    );
+    assert.deepEqual(restarted.map((provider) => provider.name), ['toxicgozen-skills', 'three']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(store, { recursive: true, force: true });
   }
 });
 

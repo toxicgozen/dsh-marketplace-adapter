@@ -19,20 +19,18 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
 在 DSH 的 **Settings → Plugins** 里用 Plugin Manager 安装上面这个目录（`install_bundle`，
 `target` 传绝对路径）。本地目录是 `link:` 安装，以后 `git pull` 就升级。
 
-### 2. 填你的仓库
+### 2. 添加 marketplace
 
-打开 `~/.dsh/profiles/desktop/cordis.patch.yml`，加一段：
+在输入框输入：
 
-```yaml
-- id: marketplace-adapter
-  config:
-    repository: owner/repo
+```
+/marketplace add owner/repo
 ```
 
-`owner/repo` 会自动补成 `https://github.com/owner/repo.git`；私有仓要求本机
+它写进 `~/.dsh/marketplace-adapter/marketplaces.json`，立刻生效，重启后仍在。私有仓要求本机
 `gh auth status` 是登录状态，令牌只在本机解析，不落盘、不进日志。
 
-多个仓库并列：
+也可以直接写配置文件（多个仓库并列）：
 
 ```yaml
 - id: marketplace-adapter
@@ -45,7 +43,8 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
         ref: main
 ```
 
-每个 marketplace 有自己的 mirror、provider 和同步状态，`/marketplace` 分行列出。
+配置里声明的条目也能用 `/marketplace remove` 停用：它写一条墓碑到 store，不改你的
+`cordis.patch.yml`；再用 `/marketplace add` 加同一个仓库就会恢复。命令添加的条目直接存在 store 里。
 
 ### 3. 用
 
@@ -71,6 +70,8 @@ packages     7
 | 位置 | 内容 |
 |---|---|
 | `/marketplace` | 每个仓库的 revision、最后同步时间、各包版本与技能数 |
+| `/marketplace add <owner/repo> [name]` | 添加并立刻挂载 |
+| `/marketplace remove <name>` | 移除命令添加的条目 |
 | `/marketplace sync [name]` | 全部同步，或只同步指定 marketplace |
 | 技能目录 | `gozen-stack-*`、`art-stack-*` …前缀就是 marketplace 里的包名 |
 | 日志 | 同步失败会写原因，并按 15s → 30s → … → 5min 退避重试 |
@@ -149,6 +150,7 @@ repo ──git fetch──► mirror ──provider──► ctx.skills ──�
 | `name` | `<owner>-<repo>` | marketplace 的稳定 id，出现在 `/marketplace`、日志与 provider 名里 |
 | `ref` | `main` | 跟踪的分支或 tag |
 | `mirrorPath` | `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 本地镜像目录 |
+| `storePath` | `$DSH_HOME/marketplace-adapter/marketplaces.json` | `/marketplace add` 写入的列表 |
 | `namespace` | `plugin` | `plugin` / `collision` / `none` |
 | `descriptionPrefix` | `false` | 描述前加 `[包名]`，让 catalog 可见命名空间 |
 | `respectDisableModelInvocation` | `true` | `false` 时强制所有技能可被模型调用 |
