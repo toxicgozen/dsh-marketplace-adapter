@@ -107,7 +107,15 @@ export class ArchiveCache {
       const temp = join(this.directory, `.current-${randomUUID()}.tmp`);
       try {
         await writeFile(temp, `${JSON.stringify(saved)}\n`, { flag: 'wx' });
-        await rename(temp, join(this.directory, 'current.json'));
+        const currentPath = join(this.directory, 'current.json');
+        try {
+          await rename(temp, currentPath);
+        } catch (error) {
+          if (!['EPERM', 'EEXIST', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+          let current;
+          try { current = JSON.parse(await readFile(currentPath, 'utf8')); } catch { throw error; }
+          if (current?.sourceKey !== saved.sourceKey || current.revision !== saved.revision || current.subdir !== saved.subdir) throw error;
+        }
       } finally { await rm(temp, { force: true }); }
       return { sourceKey: saved.sourceKey, revision: saved.revision, root: join(destination, subdir) };
     } catch (error) {
