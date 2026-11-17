@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Marketplace 适配器",
-    "description": "把技能包 marketplace 接进 DeepSeek Harness：装一次、填一个 owner/repo，技能就带包名前缀出现并自动更新。输入 /marketplace 可查看仓库、revision、最后同步时间、各包版本与技能数。DSH 读不懂的 frontmatter 会被忽略并告警。"
+    "description": "把技能包 marketplace 接进 DeepSeek Harness：装一次、填一个 owner/repo，技能就带包名前缀出现并自动更新。左侧栏的 Marketplace 页列出每个来源的 revision、同步状态、包含的包与技能数；/marketplace 给出同样的状态，并添加、移除或重新同步来源。DSH 读不懂的 frontmatter 会被忽略并告警。"
   }
 }

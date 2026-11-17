@@ -24,6 +24,10 @@ packages     7
 
 技能名带包名前缀，所以"跑 code-review"在 DSH 里是 `gozen-stack-code-review`。
 
+左侧栏还有一个 **Marketplace** 入口，点开是一页卡片：每个来源的 repository@ref、revision、
+最后同步时间、包与技能数，以及失败原因；右上角可以刷新。添加、移除和同步仍然用命令，
+页面只读，两边不各写一套逻辑。
+
 ## 添加、移除、同步
 
 ```
@@ -66,6 +70,7 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
 
 | 位置 | 内容 |
 |---|---|
+| 左侧栏 **Marketplace** | 每个来源的 revision、同步状态、包版本与技能数；右上角刷新 |
 | `/marketplace` | 每个仓库的 revision、最后同步时间、各包版本与技能数 |
 | `/marketplace add <owner/repo> [name]` | 添加并立刻挂载 |
 | `/marketplace remove <name>` | 移除命令添加的条目 |
@@ -134,6 +139,11 @@ repo ──git fetch──► mirror ──provider──► ctx.skills ──�
   `/marketplace sync` 时 `fetch` + `reset --hard`，其余时间只读本地文件。断网也能用。
 - **provider**：`ctx.skills.registerProvider`，只改 `name`、不动磁盘，所以技能里的相对引用
   （`references/x.md`、`../<兄弟技能>/SKILL.md`、`../../playbooks/x.md`）全部照旧。
+- **页面**：`client.js` 在 `sidebar.panellist` 注册 `marketplace` 行、在 `main` 的 `marketplace`
+  键注册页面。页面用 `fetch` 读 Host 的 `/api/marketplace-adapter/status`——`describeMarketplaces()`
+  的快照，没有 Typert Remote 契约要生成。读取失败时保留上一份快照并给出重试。
+- **Host 路由**：`connection.fetch.register` 挂在 Web 端已认证的 `/api` 通道上；没有 Web 载体
+  （纯 CLI）时不注册，页面也就无从打开，插件其余部分不受影响。
 - **bundle / plugin 行**：本包是 bundle，`cordis.patch.yml` 插一行 `marketplace-adapter`。
 
 ### 配置

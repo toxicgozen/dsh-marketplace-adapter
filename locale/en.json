@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Marketplace Adapter",
-    "description": "Brings a packaged skill marketplace into DeepSeek Harness: install once, point it at owner/repo, and its skills appear under package prefixes and refresh automatically. Type /marketplace for the repository, revision, last refresh, package versions and skill counts. Frontmatter DSH cannot read is ignored with a warning."
+    "description": "Brings a packaged skill marketplace into DeepSeek Harness: install once, point it at owner/repo, and its skills appear under package prefixes and refresh automatically. The Marketplace row in the left sidebar lists every source with its revision, sync state, packages and skill counts; /marketplace reports the same status and adds, removes or resyncs sources. Frontmatter DSH cannot read is ignored with a warning."
   }
 }

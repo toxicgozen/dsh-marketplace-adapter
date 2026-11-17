@@ -133,6 +133,7 @@ export function apply(ctx, config = {}) {
   const initial = storedEntriesSync(ctx, storePath, rawConfig);
   mount(mergeMarketplaceSources(declared, initial.entries, initial.removed));
   registerMarketplaceCommand(ctx, state);
+  registerStatusRoute(ctx, state);
   for (const provider of state.providers) provider.start();
 
   function mount(entries) {
@@ -302,6 +303,88 @@ function renderMarketplace(provider, packages, complete) {
   }
 
   return lines.join('\n');
+}
+
+/* -------------------------------------------------------------------------- */
+/* Client page                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Exact Fetch route the Client page reads; mounted under the Web carrier's shared `/api` channel. */
+export const STATUS_PATH = '/api/marketplace-adapter/status';
+
+/**
+ * Serve the page's read model to the browser. The page is a plain global panel,
+ * so it reads one JSON snapshot instead of a Remote service: this row has no
+ * generated Typert contract, and a GET route keeps the client half dependency-free.
+ * @param ctx - the row's Cordis context.
+ * @param state - the row's mounted providers and the declarations behind them.
+ */
+function registerStatusRoute(ctx, state) {
+  if (typeof ctx.inject !== 'function') return;
+  ctx.inject(['connection'], (scope) => {
+    scope.effect(
+      () =>
+        scope.connection.fetch.register({
+          path: STATUS_PATH,
+          methods: ['GET'],
+          requestBody: 'buffered',
+          async fetch() {
+            const body = JSON.stringify(await describeMarketplaces(state));
+            return new Response(body, {
+              status: 200,
+              headers: {
+                'content-type': 'application/json; charset=utf-8',
+                'cache-control': 'no-store',
+              },
+            });
+          },
+        }),
+      `marketplace-adapter: ${STATUS_PATH}`,
+    );
+  });
+}
+
+/**
+ * Build the JSON the Client page renders. A failing marketplace is reported in
+ * place with its reason instead of failing the whole snapshot, so one broken
+ * mirror never hides the healthy ones.
+ * @param state - the row's mounted providers and the declarations behind them.
+ * @returns the snapshot the page's fetch returns.
+ */
+export async function describeMarketplaces(state) {
+  const marketplaces = [];
+
+  for (const provider of state.providers) {
+    const entry = {
+      name: provider.config.name,
+      repository: provider.config.repository,
+      ref: provider.config.ref,
+      namespace: provider.config.namespace,
+      origin: state.declared.some((declared) => declared.name === provider.config.name) ? 'config' : 'store',
+      revision: provider.state.revision ?? null,
+      lastSync: provider.state.lastSuccessAt === 0 ? null : new Date(provider.state.lastSuccessAt).toISOString(),
+      lastError: provider.state.lastError ?? null,
+      syncing: provider.state.running !== undefined,
+      complete: false,
+      packages: [],
+    };
+
+    try {
+      const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
+      entry.complete = complete;
+      entry.packages = packages.map((item) => ({
+        name: item.name,
+        version: item.version ?? null,
+        skills: item.skills,
+      }));
+    } catch (error) {
+      entry.lastError = entry.lastError ?? message(error);
+    }
+
+    marketplaces.push(entry);
+  }
+
+  return { updatedAt: new Date().toISOString(), marketplaces };
 }
 
 /* -------------------------------------------------------------------------- */
