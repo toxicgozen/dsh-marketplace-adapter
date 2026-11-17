@@ -8,29 +8,35 @@
 
 ---
 
-## 三步
+## 用
 
-### 1. 安装
-
-```powershell
-git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
-```
-
-在 DSH 的 **Settings → Plugins** 里用 Plugin Manager 安装上面这个目录（`install_bundle`，
-`target` 传绝对路径）。本地目录是 `link:` 安装，以后 `git pull` 就升级。
-
-### 2. 添加 marketplace
-
-在输入框输入：
+在输入框输入 `/marketplace`：
 
 ```
-/marketplace add owner/repo
+marketplace  gozen  https://github.com/toxicgozen/skills.git@main
+revision     8f2c1ab
+last sync    2026/11/18 00:52:11
+packages     7
+
+  gozen-stack          0.15.41    46 skills
+  art-stack            0.9.3      12 skills
 ```
 
-它写进 `~/.dsh/marketplace-adapter/marketplaces.json`，立刻生效，重启后仍在。私有仓要求本机
-`gh auth status` 是登录状态，令牌只在本机解析，不落盘、不进日志。
+技能名带包名前缀，所以"跑 code-review"在 DSH 里是 `gozen-stack-code-review`。
 
-也可以直接写配置文件（多个仓库并列）：
+## 添加、移除、同步
+
+```
+/marketplace add owner/repo          # 添加一个 marketplace
+/marketplace add owner/repo work     # 添加并起名 work
+/marketplace remove work             # 移除
+/marketplace sync [name]             # 立刻同步
+```
+
+命令添加的条目写进 `~/.dsh/marketplace-adapter/marketplaces.json`，立刻生效、重启后仍在。
+配置里声明的条目也能被 `remove` 停用：它写一条墓碑，不改你的配置文件；再 `add` 同一个仓库就恢复。
+
+也可以直接改配置（多个仓库并列）：
 
 ```yaml
 - id: marketplace-adapter
@@ -43,28 +49,16 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
         ref: main
 ```
 
-本包声明了配置 schema，所以 **Settings → Plugins** 里会出现同样的字段表单，改完由 DSH 写回配置，
-不用手改 YAML。
+私有仓要求本机 `gh auth status` 是登录状态；令牌只在本机解析，不落盘、不进日志。
 
-配置里声明的条目也能用 `/marketplace remove` 停用：它写一条墓碑到 store，不改你的
-`cordis.patch.yml`；再用 `/marketplace add` 加同一个仓库就会恢复。命令添加的条目直接存在 store 里。
+## 安装（第一次）
 
-### 3. 用
-
-在输入框输入 `/marketplace`：
-
-```
-marketplace  https://github.com/toxicgozen/skills.git@main
-revision     8f2c1ab
-last sync    2026/11/18 00:52:11
-packages     7
-
-  gozen-stack          0.15.41    46 skills
-  art-stack            0.9.3      12 skills
-  ...
+```powershell
+git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
 ```
 
-技能名带包名前缀，所以"跑 code-review"在 DSH 里是 `gozen-stack-code-review`。
+在 DSH 的 **Settings → Plugins** 里用 Plugin Manager 安装上面这个目录（`install_bundle`，
+`target` 传绝对路径）。本地目录是 `link:` 安装，以后 `git pull` 就升级。
 
 ---
 
