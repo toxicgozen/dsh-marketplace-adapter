@@ -31,7 +31,7 @@ export const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const DEFAULT_PROVIDER = 'toxicgozen';
 const DEFAULT_REPOSITORY = 'https://github.com/toxicgozen/skills.git';
-const DEFAULT_REF = 'main';
+const DEFAULT_REF = 'HEAD';
 const DEFAULT_RANK = 300;
 const DEFAULT_TOKEN_COMMAND = Object.freeze(['gh', 'auth', 'token']);
 /** Wall-clock cadence for the refresh check; the check itself is cheap. */
@@ -401,7 +401,7 @@ export function normalizeConfig(raw = {}) {
     throw new TypeError('marketplace-adapter: config must be an object');
   }
 
-  const repository = normalizeRepository(optionalString(raw.repository) ?? DEFAULT_REPOSITORY);
+  const repository = normalizeRepository(optionalString(raw.url) ?? optionalString(raw.repository) ?? DEFAULT_REPOSITORY);
   const ref = optionalString(raw.ref) ?? DEFAULT_REF;
   const mirrorPath = resolve(optionalString(raw.mirrorPath) ?? defaultMirrorPath(repository));
 
@@ -422,6 +422,7 @@ export function normalizeConfig(raw = {}) {
 
   return {
     repository,
+    url: repository,
     ref,
     mirrorPath,
     storePath: resolve(optionalString(raw.storePath) ?? defaultStorePath()),
@@ -449,7 +450,7 @@ export function normalizeConfig(raw = {}) {
  * @returns a Git URL.
  */export function normalizeRepository(value) {
   const text = String(value).trim();
-  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}.git` : text;
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}` : text;
 }
 
 /**
