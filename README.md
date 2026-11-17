@@ -55,9 +55,9 @@ GitHub 仓库映射到官方 `/repos/{owner}/{repo}/tarball` API。`ref: HEAD` �
 | `ref` | `HEAD` | 共享默认值在逐项配置合并后生效；直接归档由 URL 决定下载内容，ref 仅参与缓存隔离 |
 | `tokenEnv` | — | POSIX 环境变量名，逐次解析 |
 | `cachePath` | `$DSH_HOME/marketplace-adapter/snapshots` | 缓存根；可在顶层安全共享，内部按来源键隔离 |
-| `mirrorPath` | 旧 `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 首次同步前的只读兼容目录；迁移行为见下文 |
+| `mirrorPath` | — | 仅显式指定时，作为首次同步前的只读兼容目录；已有当前来源快照时优先读快照 |
 | `storePath` | `$DSH_HOME/marketplace-adapter/marketplaces.json` | 命令拥有的来源列表 |
-| `syncOnApply` | `true` | `false` 时不自动同步，仅提供已有快照或旧目录 |
+| `syncOnApply` | `true` | `false` 时不自动同步，仅提供已有快照或显式指定的旧目录 |
 | `syncIntervalMinutes` | `60` | `0` 时启动最多同步一次，失败也不自动重试；仍可手动同步 |
 | `fetchTimeoutMs` | `180000` | 一次 HTTP 下载的超时，最小 1000 ms |
 | `namespace` | `plugin` | `plugin` 全加包前缀；`collision` 仅重名加前缀；`none` 使用原名 |
@@ -75,7 +75,7 @@ Claude Code、Codex 的来源身份与缓存方式，以及本实现的取舍，
 
 0.2.0 完全移除 marketplace 的 Git clone、fetch 和 reset。`gitPath`、`sslBackend`、`tokenCommand` 被忽略；SSH Git URL 和非 GitHub 的普通 Git URL不再支持。改填 GitHub HTTPS URL 或直接 HTTPS 归档，并用 `tokenEnv` 显式引用凭据。
 
-旧 `repository` 仍可读取。旧 clone 只读保留，插件不搬动、重置或删除它；第一次 HTTP 同步成功后改为读取快照。如果显式指定旧 `mirrorPath` 且没有 `cachePath`，新缓存放在相邻的 `<mirrorPath>.archives`，避免写入旧 clone。建议新配置直接使用 `cachePath`。新缓存目录不会被当成旧 clone 扫描。
+旧 `repository` 仍可读取。插件默认不读取旧 clone，也不搬动、重置或删除它；当前 URL 和 ref 没有快照时，技能目录显示为尚未就绪。需要只读过渡时，显式指定 `mirrorPath`；此目录由用户选择，插件不推断它属于哪个 ref。已有当前来源快照时优先读快照，首次 HTTP 同步成功后也会切换到快照。如果指定 `mirrorPath` 且没有 `cachePath`，新缓存放在相邻的 `<mirrorPath>.archives`，避免写入旧 clone。建议新配置直接使用 `cachePath`。新缓存目录不会被当成旧 clone 扫描。
 
 默认 ref 从 `main` 改为 `HEAD`，因此遵循仓库默认分支。若仍需固定 `main`，显式填写 `ref: main`。v1 Store 保持兼容，只写支持的非秘密字段。
 

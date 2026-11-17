@@ -7,15 +7,10 @@
     - id: marketplace-adapter
       name: 'dsh-marketplace-adapter'
       config:
-        repository: https://github.com/toxicgozen/skills.git
-        ref: main
+        url: https://github.com/toxicgozen/skills
+        ref: HEAD
         # Full package directory name as the skill-name prefix:
         # plugins/gozen-stack/skills/code-review -> gozen-stack-code-review
         namespace: plugin
-        # `auto` uses the system TLS backend and only retries with OpenSSL when
-        # Git reports the schannel SEC_E_NO_CREDENTIALS failure. That failure is
-        # a sandbox artifact, not a host one: the plugin runs in the Host
-        # process, so the ordinary backend is expected to work here.
-        sslBackend: auto
         syncOnApply: true
         syncIntervalMinutes: 60
