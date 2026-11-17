@@ -23,6 +23,33 @@ async function manifest(root, relativePath, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+test('schema item ref inherits the shared ref and only then defaults to HEAD', () => {
+  const raw = Config({ ref: 'release', marketplaces: [{ url: 'example/one' }] });
+  assert.equal(raw.marketplaces[0].ref, undefined);
+  assert.equal(normalizeBundleConfig(raw).marketplaces[0].ref, 'release');
+  assert.throws(() => Config({ tokenEnv: 'invalid-name' }));
+});
+
+test('root packages select their own skill directories and discovery alone may fall back to directory name', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-marketplace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writePackage(root, '.', 'one');
+  await writePackage(root, '.', 'two');
+  await writeFile(join(root, 'skills/one/SKILL.md'), '---\ndescription: Directory fallback.\n---\nBody.');
+  await manifest(root, '.codex-plugin/plugin.json', { version: '2.0' });
+  await manifest(root, '.claude-plugin/marketplace.json', { plugins: [
+    { name: 'first', source: './', skills: ['./skills/one'] },
+    { name: 'second', source: { source: 'local', path: './' }, skills: ['./skills/two'] },
+    { name: 'remote', source: { source: 'url', path: './' } },
+    { name: 'git', source: { source: 'git-subdir', path: './' } },
+  ] });
+  const warnings = [];
+  const { candidates } = await collectSkillCandidates(config(root), { onWarning: (text) => warnings.push(text) });
+  assert.deepEqual(candidates.map((x) => x.name), ['first-one', 'second-two']);
+  assert.equal(candidates[0].metadata.version, '2.0');
+  assert.equal(warnings.filter((x) => /unsupported/.test(x)).length, 2);
+});
+
 test('the owner/repo shorthand becomes a GitHub URL and other values stay untouched', () => {
   assert.equal(normalizeRepository('toxicgozen/skills'), 'https://github.com/toxicgozen/skills.git');
   assert.equal(normalizeRepository('https://gitlab.example.com/team/skills.git'), 'https://gitlab.example.com/team/skills.git');

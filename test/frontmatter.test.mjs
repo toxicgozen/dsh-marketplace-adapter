@@ -3,6 +3,19 @@ import assert from 'node:assert/strict';
 
 import { parseFrontmatter, parseSkillDocument, normalizeConfig, defaultMirrorPath } from '../index.js';
 
+test('uses complete YAML semantics and reports malformed documents', () => {
+  const parsed = parseSkillDocument('---\nname: alpha # comment\ndescription: >-\n  first line\n  second line\nwhenToUse: "\\u4e2d\\u6587"\npaths:\n  - "**/*.ts"\n---\nBody.');
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.skill.name, 'alpha');
+  assert.equal(parsed.skill.description, 'first line second line');
+  assert.equal(parsed.skill.whenToUse, '中文');
+  for (const yaml of ['name: alpha\nname: beta\ndescription: A.', 'name: alpha\ndescription: [broken', '[one, two]']) {
+    const invalid = parseSkillDocument(`---\n${yaml}\n---\n`);
+    assert.equal(invalid.ok, false);
+    assert.match(invalid.reason, /YAML|mapping/);
+  }
+});
+
 test('parses a plain frontmatter block and trims the body', () => {
   const parsed = parseFrontmatter('---\nname: ticktick-organize-tasks\ndescription: Organize tasks.\n---\n\n# Heading\n\nBody text.\n');
   assert.equal(parsed.data.name, 'ticktick-organize-tasks');
