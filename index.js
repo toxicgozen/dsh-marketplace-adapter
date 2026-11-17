@@ -13,13 +13,13 @@
  * (`references/…`, `../<sibling>/SKILL.md`, `../../playbooks/…`) still resolves
  * against the real directory tree.
  *
- * @module @toxicgozen/dsh-skill-adapter
+ * @module dsh-marketplace-adapter
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 const execFileAsync = promisify(execFile);
@@ -61,6 +61,17 @@ const HOST_SPECIFIC_FIELDS = Object.freeze([
   'model',
 ]);
 const NAMESPACES = Object.freeze(['none', 'collision', 'plugin']);
+
+/**
+ * Marketplace manifests a packaged skill repository may ship. They declare the
+ * packages and their directories, so a repository is not required to look like
+ * `plugins/<package>`; the directory scan is only the fallback.
+ */
+const MARKETPLACE_MANIFESTS = Object.freeze([
+  '.claude-plugin/marketplace.json',
+  '.cursor-plugin/marketplace.json',
+  '.agents/plugins/marketplace.json',
+]);
 const SSL_BACKENDS = Object.freeze(['auto', 'openssl', 'schannel']);
 const TRUTHY = new Set(['true', 'yes', 'on', '1']);
 const FALSY = new Set(['false', 'no', 'off', '0']);
@@ -78,7 +89,7 @@ export function apply(ctx, config = {}) {
   let provider;
 
   ctx.skills.registerProvider((control) => {
-    provider = new SkillPluginsProvider(ctx, normalized, control);
+    provider = new MarketplaceAdapterProvider(ctx, normalized, control);
     return provider;
   });
 
@@ -96,26 +107,26 @@ export function apply(ctx, config = {}) {
  */
 export function normalizeConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new TypeError('skill-adapter: config must be an object');
+    throw new TypeError('marketplace-adapter: config must be an object');
   }
 
-  const repository = optionalString(raw.repository) ?? DEFAULT_REPOSITORY;
+  const repository = normalizeRepository(optionalString(raw.repository) ?? DEFAULT_REPOSITORY);
   const ref = optionalString(raw.ref) ?? DEFAULT_REF;
   const mirrorPath = resolve(optionalString(raw.mirrorPath) ?? defaultMirrorPath(repository));
 
   const namespace = optionalString(raw.namespace) ?? 'plugin';
   if (!NAMESPACES.includes(namespace)) {
-    throw new Error(`skill-adapter: namespace must be one of ${NAMESPACES.join(', ')} (got "${namespace}")`);
+    throw new Error(`marketplace-adapter: namespace must be one of ${NAMESPACES.join(', ')} (got "${namespace}")`);
   }
 
   const sslBackend = optionalString(raw.sslBackend) ?? 'auto';
   if (!SSL_BACKENDS.includes(sslBackend)) {
-    throw new Error(`skill-adapter: sslBackend must be one of ${SSL_BACKENDS.join(', ')} (got "${sslBackend}")`);
+    throw new Error(`marketplace-adapter: sslBackend must be one of ${SSL_BACKENDS.join(', ')} (got "${sslBackend}")`);
   }
 
   const providerName = optionalString(raw.providerName) ?? DEFAULT_PROVIDER;
   if (providerName === 'runtime') {
-    throw new Error('skill-adapter: providerName "runtime" is reserved by the skill registry');
+    throw new Error('marketplace-adapter: providerName "runtime" is reserved by the skill registry');
   }
 
   return {
@@ -139,10 +150,21 @@ export function normalizeConfig(raw = {}) {
   };
 }
 
+/**
+ * Accept the `owner/repo` shorthand a marketplace URL field uses, and leave any
+ * other value untouched so SSH and self-hosted URLs still work.
+ * @param value - the configured repository.
+ * @returns a Git URL.
+ */
+export function normalizeRepository(value) {
+  const text = String(value).trim();
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}.git` : text;
+}
+
 function normalizePlugins(value) {
   if (value === undefined || value === null) return { include: [], exclude: [] };
   if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('skill-adapter: plugins must be an object with optional include/exclude arrays');
+    throw new Error('marketplace-adapter: plugins must be an object with optional include/exclude arrays');
   }
   return {
     include: stringArray(value.include, 'plugins.include'),
@@ -153,7 +175,7 @@ function normalizePlugins(value) {
 function stringArray(value, field) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) {
-    throw new Error(`skill-adapter: ${field} must be an array of non-empty strings`);
+    throw new Error(`marketplace-adapter: ${field} must be an array of non-empty strings`);
   }
   return [...value];
 }
@@ -164,7 +186,7 @@ function normalizeTokenCommand(value) {
   if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === 'string' && part.length > 0)) {
     return [...value];
   }
-  throw new Error('skill-adapter: tokenCommand must be a non-empty string array, or "none"');
+  throw new Error('marketplace-adapter: tokenCommand must be a non-empty string array, or "none"');
 }
 
 function optionalString(value) {
@@ -173,14 +195,14 @@ function optionalString(value) {
 
 function optionalBoolean(value, fallback) {
   if (value === undefined || value === null) return fallback;
-  if (typeof value !== 'boolean') throw new Error(`skill-adapter: expected a boolean, got ${typeof value}`);
+  if (typeof value !== 'boolean') throw new Error(`marketplace-adapter: expected a boolean, got ${typeof value}`);
   return value;
 }
 
 function optionalNumber(value, fallback, minimum) {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum) {
-    throw new Error(`skill-adapter: expected a number >= ${minimum}, got ${String(value)}`);
+    throw new Error(`marketplace-adapter: expected a number >= ${minimum}, got ${String(value)}`);
   }
   return value;
 }
@@ -260,7 +282,7 @@ export class GitMirror {
       const text = message(error);
       const tlsFailure = /schannel|SEC_E_NO_CREDENTIALS|AcquireCredentialsHandle/i.test(text);
       if (this.config.sslBackend === 'auto' && tlsFailure) {
-        this.logger.info('skill-adapter: retrying Git with http.sslBackend=openssl');
+        this.logger.info('marketplace-adapter: retrying Git with http.sslBackend=openssl');
         return this.execGit(args, timeoutMs, true);
       }
       throw error;
@@ -355,7 +377,7 @@ export class GitMirror {
         this.tokenState = { value: undefined, resolved: true };
         return undefined;
       }
-      const text = `skill-adapter: token command failed: ${message(error)}`;
+      const text = `marketplace-adapter: token command failed: ${message(error)}`;
       if (this.tokenWarning !== text) {
         this.tokenWarning = text;
         this.logger.warn(text);
@@ -452,7 +474,7 @@ export function shouldSync(state, config, now) {
 /* Provider                                                                   */
 /* -------------------------------------------------------------------------- */
 
-export class SkillPluginsProvider {
+export class MarketplaceAdapterProvider {
   constructor(ctx, config, control, deps = {}) {
     this.ctx = ctx;
     this.config = config;
@@ -533,7 +555,7 @@ export class SkillPluginsProvider {
     if (this.warned.has(key)) return;
     if (this.warned.size > 200) this.warned.clear();
     this.warned.add(key);
-    this.ctx.logger.warn(`skill-adapter: ${key}`);
+    this.ctx.logger.warn(`marketplace-adapter: ${key}`);
   }
 
   runSyncIfDue(now = this.now()) {
@@ -566,12 +588,12 @@ export class SkillPluginsProvider {
       this.state.consecutiveFailures = 0;
       this.state.lastError = undefined;
       this.control.invalidate();
-      this.ctx.logger.info(`skill-adapter: ${config.repository}@${config.ref} at ${revision}`);
+      this.ctx.logger.info(`marketplace-adapter: ${config.repository}@${config.ref} at ${revision}`);
     } catch (error) {
       this.state.consecutiveFailures += 1;
       this.state.lastError = message(error);
       const delay = Math.round(backoffDelayMs(this.state.consecutiveFailures) / 1000);
-      this.ctx.logger.warn(`skill-adapter: sync failed (${this.state.lastError}); retry in ${delay}s`);
+      this.ctx.logger.warn(`marketplace-adapter: sync failed (${this.state.lastError}); retry in ${delay}s`);
     } finally {
       this.state.lastAttemptAt = this.now();
       await lock.release();
@@ -584,7 +606,7 @@ export class SkillPluginsProvider {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Scan a mirror's `plugins/<plugin>/skills/<skill>/SKILL.md` entries.
+ * Scan a mirror for skill packages and their `skills/<skill>/SKILL.md` entries.
  * @param config - a normalized configuration.
  * @param hooks - optional provider label, abort signal and warning sink.
  * @returns `{ candidates, complete }`; incomplete until the mirror first exists.
@@ -594,26 +616,14 @@ export async function collectSkillCandidates(config, hooks = {}) {
   const signal = hooks.signal;
   const onWarning = hooks.onWarning ?? (() => {});
 
-  const pluginsDir = join(config.mirrorPath, 'plugins');
-  let pluginEntries;
-  try {
-    pluginEntries = await readdir(pluginsDir, { withFileTypes: true });
-  } catch (error) {
-    if (isAbsent(error)) return { candidates: [], complete: false };
-    throw error;
-  }
-
-  const plugins = pluginEntries
-    .filter((entry) => !entry.name.startsWith('.'))
-    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-    .map((entry) => entry.name)
-    .sort()
-    .filter((name) => isSelected(config, name));
+  const { packages, complete } = await listPackages(config, onWarning);
+  if (!complete) return { candidates: [], complete: false };
 
   const collected = [];
-  for (const plugin of plugins) {
+  for (const item of packages) {
     signal?.throwIfAborted?.();
-    const pluginDir = join(pluginsDir, plugin);
+    const plugin = item.name;
+    const pluginDir = item.dir;
     const manifest = await readPluginManifest(pluginDir);
     const skillsDir = join(pluginDir, 'skills');
 
@@ -696,7 +706,89 @@ export async function collectSkillCandidates(config, hooks = {}) {
   }
 
   candidates.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
-  return { candidates, complete: true };
+  return { candidates, complete };
+}
+
+/**
+ * Packages declared by a marketplace manifest, or the `plugins/` directory when
+ * the repository ships none. A manifest that cannot be used warns and falls back,
+ * so a broken manifest never empties the catalog.
+ * @returns `{ packages, complete }`; incomplete only when the mirror is absent.
+ */
+async function listPackages(config, onWarning) {
+  const declared = await packagesFromMarketplace(config, onWarning);
+  if (declared !== undefined) return { packages: declared, complete: true };
+  return packagesFromPluginsDir(config);
+}
+
+async function packagesFromMarketplace(config, onWarning) {
+  for (const relativePath of MARKETPLACE_MANIFESTS) {
+    let text;
+    try {
+      text = await readFile(join(config.mirrorPath, relativePath), 'utf8');
+    } catch (error) {
+      if (isAbsent(error)) continue;
+      throw error;
+    }
+
+    let manifest;
+    try {
+      manifest = JSON.parse(text);
+    } catch {
+      onWarning(`${relativePath} is not valid JSON; reading plugins/ instead`);
+      return undefined;
+    }
+    if (!Array.isArray(manifest?.plugins)) {
+      onWarning(`${relativePath} has no plugins array; reading plugins/ instead`);
+      return undefined;
+    }
+
+    const packages = [];
+    for (const entry of manifest.plugins) {
+      const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+      const source = typeof entry?.source === 'string' ? entry.source : entry?.source?.path;
+      const path = typeof source === 'string' ? source.trim() : '';
+      if (name === '' || path === '') {
+        onWarning(`${relativePath} has a package entry without a name and source path`);
+        continue;
+      }
+      const dir = resolve(config.mirrorPath, path);
+      if (!isInside(config.mirrorPath, dir)) {
+        onWarning(`${relativePath}: package "${name}" points outside the mirror; ignored`);
+        continue;
+      }
+      packages.push({ name, dir });
+    }
+
+    return packages.sort((left, right) => left.name.localeCompare(right.name)).filter((item) => isSelected(config, item.name));
+  }
+
+  return undefined;
+}
+
+async function packagesFromPluginsDir(config) {
+  const pluginsDir = join(config.mirrorPath, 'plugins');
+  let entries;
+  try {
+    entries = await readdir(pluginsDir, { withFileTypes: true });
+  } catch (error) {
+    if (isAbsent(error)) return { packages: [], complete: false };
+    throw error;
+  }
+
+  const packages = entries
+    .filter((entry) => !entry.name.startsWith('.'))
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+    .map((entry) => ({ name: entry.name, dir: join(pluginsDir, entry.name) }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .filter((item) => isSelected(config, item.name));
+
+  return { packages, complete: true };
+}
+
+function isInside(root, target) {
+  const path = relative(root, target);
+  return path !== '' && !path.startsWith('..') && !isAbsolute(path);
 }
 
 function isSelected(config, plugin) {

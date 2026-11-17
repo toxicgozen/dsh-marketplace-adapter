@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Git 技能适配器",
-    "description": "从技能包仓库的 Git 镜像读取技能，保留 Codex、Cursor、Claude Code 共用的仓库结构。"
+    "title": "Marketplace 适配器",
+    "description": "把技能包 marketplace 的 Git 镜像转换成 DSH 的技能来源，保留 Codex、Cursor、Claude Code 共用的仓库结构。"
   }
 }

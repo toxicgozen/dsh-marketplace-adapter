@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Git Skill Adapter",
-    "description": "Serves skills from a Git mirror of a packaged skill repository, keeping the repository layout that Codex, Cursor and Claude Code use."
+    "title": "Marketplace Adapter",
+    "description": "Adapts a packaged skill marketplace into namespaced DSH skills, reading the same repository layout that Claude Code, Codex and Cursor use."
   }
 }

@@ -167,7 +167,7 @@ test('a stale mirror lock is taken over', async () => {
 });
 
 test('host-specific frontmatter fields warn once instead of drifting silently', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-skill-adapter-'));
+  const root = await mkdtemp(join(tmpdir(), 'dsh-marketplace-adapter-'));
   try {
     const mirrorPath = join(root, 'mirror');
     const skills = join(mirrorPath, 'plugins', 'gozen-stack', 'skills');

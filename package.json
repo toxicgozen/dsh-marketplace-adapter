@@ -1,16 +1,16 @@
 {
-  "name": "@toxicgozen/dsh-skill-adapter",
+  "name": "dsh-marketplace-adapter",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Serves skills from a Git mirror of a packaged skill repository as namespaced DSH skills.",
+  "description": "Adapts a packaged skill marketplace into namespaced DSH skills.",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "bin": {
-    "dsh-skill-adapter-sync": "./bin/sync.mjs"
+    "dsh-marketplace-adapter-sync": "./bin/sync.mjs"
   },
   "files": [
     "index.js",
@@ -24,7 +24,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/frontmatter.test.mjs && node test/discovery.test.mjs && node test/provider.test.mjs && node test/mirror.test.mjs && node test/repository.test.mjs",
+    "test": "node test/frontmatter.test.mjs && node test/discovery.test.mjs && node test/marketplace.test.mjs && node test/provider.test.mjs && node test/mirror.test.mjs && node test/repository.test.mjs",
     "sync": "node bin/sync.mjs"
   },
   "dsh": {

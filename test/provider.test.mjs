@@ -7,7 +7,7 @@ import {
   RETRY_BASE_MS,
   RETRY_MAX_MS,
   SYNC_TICK_MS,
-  SkillPluginsProvider,
+  MarketplaceAdapterProvider,
   normalizeConfig,
   syncDueAt,
 } from '../index.js';
@@ -61,7 +61,7 @@ function providerWith(mirror, overrides = {}) {
   const control = fakeControl();
   const timers = fakeTimers();
   const now = { value: 1_000_000 };
-  const provider = new SkillPluginsProvider(ctx, config(overrides), control, {
+  const provider = new MarketplaceAdapterProvider(ctx, config(overrides), control, {
     mirror,
     timers,
     now: () => now.value,

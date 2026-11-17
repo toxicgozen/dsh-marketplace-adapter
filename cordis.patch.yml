@@ -1,11 +1,11 @@
-# Bundle patch for @toxicgozen/dsh-skill-adapter.
+# Bundle patch for dsh-marketplace-adapter.
 #
 # This inserts one Host row. Override it by id from the profile's own
 # cordis.patch.yml; a matching override replaces the complete `config`,
 # so restate every field you still want.
 - insert:
-    - id: skill-adapter
-      name: '@toxicgozen/dsh-skill-adapter'
+    - id: marketplace-adapter
+      name: 'dsh-marketplace-adapter'
       config:
         repository: https://github.com/toxicgozen/skills.git
         ref: main

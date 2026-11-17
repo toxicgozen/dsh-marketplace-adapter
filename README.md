@@ -1,10 +1,27 @@
-# @toxicgozen/dsh-skill-adapter
+# dsh-marketplace-adapter
 
-把 `toxicgozen/skills` 这类「多 agent 共享的命名空间插件仓库」接进 DeepSeek Harness 的下游适配器。
-仓库本身 **一个字节都不用改**，Claude Code / Codex / Cursor / Pi 的安装方式也不受影响。
+把 agent marketplace 仓库（Claude Code / Codex / Cursor 那套 `plugins/<包>/skills/<技能>/SKILL.md`）
+转成 DeepSeek Harness 的技能来源。仓库本身 **一个字节都不用改**，其它宿主的安装方式也不受影响。
 
-本仓库是公开的适配器；被适配的技能仓库可以是私有仓，令牌只在本机解析，不随本包分发。
-使用者的路径是「装一个插件、配一次仓库地址」，不需要以开发者身份 clone 技能仓库。
+本仓库是公开的适配器；被适配的 marketplace 可以是私有仓，令牌只在本机解析，不随本包分发。
+使用者的路径是「装一个插件、填一次 `owner/repo`」，不需要以开发者身份 clone 技能仓库。
+
+---
+
+## 它读什么
+
+优先读仓库自带的 marketplace 清单，按顺序取第一个能用的：
+
+| 清单 | 谁在用 |
+|---|---|
+| `.claude-plugin/marketplace.json` | Claude Code |
+| `.cursor-plugin/marketplace.json` | Cursor |
+| `.agents/plugins/marketplace.json` | Codex |
+
+清单里的 `plugins[].name` 是包名，也就是技能前缀；`source` 是包目录（相对仓库根，
+字符串和 `{ "path": … }` 两种写法都认）。读不到清单时才退回扫 `plugins/<包>/skills/`。
+
+清单写坏了只 warn 并退回扫目录，不会把 catalog 清空；指向仓库外的包会被忽略。
 
 ---
 
@@ -13,7 +30,7 @@
 本包是一个 bundle（`package.json` 里声明了 `dsh.bundle.patch`），把它装进 profile 即可：
 
 ```powershell
-git clone https://github.com/toxicgozen/dsh-skill-adapter.git
+git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
 ```
 
 然后在 DSH 里用 `plugin_manager` 的 `install_bundle`，`target` 传这个目录的绝对路径。
@@ -65,8 +82,8 @@ DSH 的 profile（这里是 `desktop`）由若干 bundle 叠加而成。`install
 
 ```yaml
 - insert:
-    - id: skill-adapter
-      name: '@toxicgozen/dsh-skill-adapter'
+    - id: marketplace-adapter
+      name: 'dsh-marketplace-adapter'
 ```
 
 ### 3. plugin（插件行）
@@ -127,17 +144,17 @@ DSH 硬约束，不是本插件的选择：
 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里按 id 覆盖（覆盖会替换**整个** `config`，要写全）：
 
 ```yaml
-- id: skill-adapter
-  name: '@toxicgozen/dsh-skill-adapter'
+- id: marketplace-adapter
+  name: 'dsh-marketplace-adapter'
   config:
-    repository: https://github.com/toxicgozen/skills.git
+    repository: toxicgozen/skills
     ref: main
     namespace: plugin
 ```
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `repository` | `https://github.com/toxicgozen/skills.git` | 源仓库 |
+| `repository` | `https://github.com/toxicgozen/skills.git` | 源仓库；也接受 `owner/repo` 简写 |
 | `ref` | `main` | 跟踪的分支或 tag |
 | `mirrorPath` | `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 本地镜像目录 |
 | `namespace` | `plugin` | `plugin` / `collision` / `none` |
