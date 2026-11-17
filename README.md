@@ -69,6 +69,8 @@ GitHub 仓库映射到官方 `/repos/{owner}/{repo}/tarball` API。`ref: HEAD` �
 
 顶层字段为每项默认值；`name`、`providerName` 和旧 `mirrorPath` 按项指定。常规失败按 15 秒、30 秒、60 秒逐步退避，最多 5 分钟。同一 provider 的同步单飞；跨进程发布相同摘要不会改动现有资源。Store 使用 `proper-lockfile` 保护整个读改写事务。
 
+Claude Code、Codex 的来源身份与缓存方式，以及本实现的取舍，见[官方来源调查](docs/marketplace-sources.md)。
+
 ## 从 0.1.x 迁移
 
 0.2.0 完全移除 marketplace 的 Git clone、fetch 和 reset。`gitPath`、`sslBackend`、`tokenCommand` 被忽略；SSH Git URL 和非 GitHub 的普通 Git URL不再支持。改填 GitHub HTTPS URL 或直接 HTTPS 归档，并用 `tokenEnv` 显式引用凭据。
