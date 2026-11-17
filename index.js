@@ -93,7 +93,62 @@ export function apply(ctx, config = {}) {
     return provider;
   });
 
+  registerMarketplaceCommand(ctx, provider);
   provider.start();
+}
+
+/**
+ * `/marketplace` is the human-facing read of the same state the provider keeps:
+ * what repository is adapted, which revision it is on, when it last refreshed,
+ * and which packages and versions it serves. The settings UI calls the same
+ * command once it exists.
+ */
+function registerMarketplaceCommand(ctx, provider) {
+  const commands = ctx.get('commands');
+  if (commands === undefined) return;
+
+  commands.register({
+    name: 'marketplace',
+    description: 'Show the adapted marketplace: packages, versions and the last refresh',
+    input: { hint: '[sync]' },
+    async handler(invocation) {
+      const action = invocation.rawInput.trim().toLowerCase();
+      if (action === 'sync') {
+        await provider.runSync();
+      } else if (action !== '') {
+        return { kind: 'error', text: 'usage: /marketplace [sync]' };
+      }
+
+      try {
+        const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
+        return { kind: 'success', text: renderMarketplace(provider, packages, complete) };
+      } catch (error) {
+        return { kind: 'error', text: `marketplace: ${message(error)}` };
+      }
+    },
+  });
+}
+
+function renderMarketplace(provider, packages, complete) {
+  const config = provider.config;
+  const state = provider.state;
+  const lines = [
+    `marketplace  ${config.repository}@${config.ref}`,
+    `revision     ${state.revision ?? 'not synced yet'}`,
+    `last sync    ${state.lastSuccessAt === 0 ? 'never' : new Date(state.lastSuccessAt).toLocaleString()}`,
+    `packages     ${packages.length}${complete ? '' : ' (mirror missing)'}`,
+  ];
+  if (state.lastError !== undefined) lines.push(`last error   ${state.lastError}`);
+
+  if (packages.length > 0) {
+    lines.push('');
+    const width = Math.max(...packages.map((item) => item.name.length));
+    for (const item of packages) {
+      lines.push(`  ${item.name.padEnd(width)}  ${(item.version ?? '-').padEnd(10)} ${item.skills} skills`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -487,6 +542,7 @@ export class MarketplaceAdapterProvider {
       lastSuccessAt: 0,
       consecutiveFailures: 0,
       lastError: undefined,
+      revision: undefined,
     };
     this.now = deps.now ?? (() => Date.now());
     this.timers = deps.timers ?? { setInterval, clearInterval };
@@ -587,6 +643,7 @@ export class MarketplaceAdapterProvider {
       this.state.lastSuccessAt = this.now();
       this.state.consecutiveFailures = 0;
       this.state.lastError = undefined;
+      this.state.revision = revision;
       this.control.invalidate();
       this.ctx.logger.info(`marketplace-adapter: ${config.repository}@${config.ref} at ${revision}`);
     } catch (error) {
@@ -789,6 +846,37 @@ async function packagesFromPluginsDir(config) {
 function isInside(root, target) {
   const path = relative(root, target);
   return path !== '' && !path.startsWith('..') && !isAbsolute(path);
+}
+
+/**
+ * Read-only snapshot for `/marketplace`: each package's name, version and skill
+ * count, plus whether the mirror could be read at all.
+ * @param config - a normalized configuration.
+ * @param onWarning - sink for unreadable manifests or directories.
+ * @returns `{ packages, complete }`.
+ */
+export async function describeMarketplace(config, onWarning = () => {}) {
+  const { packages, complete } = await listPackages(config, onWarning);
+  const rows = [];
+  for (const item of packages) {
+    const manifest = await readPluginManifest(item.dir);
+    rows.push({
+      name: item.name,
+      version: typeof manifest?.version === 'string' ? manifest.version : undefined,
+      skills: await countSkills(join(item.dir, 'skills')),
+    });
+  }
+  return { packages: rows, complete };
+}
+
+async function countSkills(skillsDir) {
+  try {
+    const entries = await readdir(skillsDir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).length;
+  } catch (error) {
+    if (isAbsent(error)) return 0;
+    throw error;
+  }
 }
 
 function isSelected(config, plugin) {

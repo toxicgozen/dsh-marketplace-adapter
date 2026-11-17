@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Marketplace Adapter",
-    "description": "Adapts a packaged skill marketplace into namespaced DSH skills, reading the same repository layout that Claude Code, Codex and Cursor use."
+    "description": "Brings a packaged skill marketplace into DeepSeek Harness: install once, point it at owner/repo, and its skills appear under package prefixes and refresh automatically. Type /marketplace for the repository, revision, last refresh, package versions and skill counts. Frontmatter DSH cannot read is ignored with a warning."
   }
 }

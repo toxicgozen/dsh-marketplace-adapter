@@ -24,7 +24,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/frontmatter.test.mjs && node test/discovery.test.mjs && node test/marketplace.test.mjs && node test/provider.test.mjs && node test/mirror.test.mjs && node test/repository.test.mjs",
+    "test": "node test/frontmatter.test.mjs && node test/discovery.test.mjs && node test/marketplace.test.mjs && node test/command.test.mjs && node test/provider.test.mjs && node test/mirror.test.mjs && node test/repository.test.mjs",
     "sync": "node bin/sync.mjs"
   },
   "dsh": {
