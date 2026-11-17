@@ -1,7 +1,7 @@
 import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeConfig } from '../index.js';
+import { normalizeConfig, MarketplaceAdapterProvider } from '../index.js';
 import { ArchiveCache } from '../archive.js';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -108,6 +108,66 @@ test('a broken local package declaration cannot replace the last-good snapshot',
     body = await readFile(archive);
     await assert.rejects(cache.sync(), /package/);
     assert.deepEqual(await cache.current(), first);
+  }
+});
+
+test('provider switches root while old candidates and legacy resources remain readable', async (t) => {
+  const { dir, bytes } = await fixture(t);
+  let body = bytes;
+  const tokens = [];
+  const origin = await server(t, (req, res) => { tokens.push(req.headers.authorization); res.end(body); });
+  const config = normalizeConfig({ url: `${origin}/repo.tar.gz`, mirrorPath: join(dir, 'repo'), cachePath: join(dir, 'cache'), syncOnApply: false, tokenEnv: 'WORK_TOKEN' });
+  const filename = join(dir, 'repo/plugins/sample/skills/one/SKILL.md');
+  await writeFile(filename, '---\ndescription: Directory fallback.\n---\nFirst body.');
+  const file = join(dir, 'updated.tar.gz');
+  await tar.c({ file, gzip: true, cwd: dir }, ['repo']);
+  body = await readFile(file);
+  let token = 'first-token';
+  const ctx = { get(name) { if (name === 'credentials') return { resolve: async () => ({ value: token }) }; }, logger: { info() {}, warn() {} } };
+  const provider = new MarketplaceAdapterProvider(ctx, config, { signal: new AbortController().signal, invalidate() {} });
+  assert.equal(await provider.runSync(), true);
+  const old = (await provider.list()).candidates[0];
+  assert.equal((await provider.get(old)).content, 'First body.');
+  await writeFile(filename, '---\nname: one\ndescription: Second.\n---\nSecond body.');
+  await writeFile(join(dir, 'repo/plugins/sample/skills/one/resource.txt'), 'new resource');
+  await tar.c({ file, gzip: true, cwd: dir }, ['repo']);
+  body = await readFile(file);
+  token = 'second-token';
+  assert.equal(await provider.runSync(), true);
+  const current = (await provider.list()).candidates[0];
+  assert.notEqual(current.path, old.path);
+  assert.equal((await provider.get(old)).content, 'First body.');
+  assert.equal(await readFile(join(old.resourceBase.path, 'resource.txt'), 'utf8'), 'old resource');
+  assert.equal(await readFile(join(current.resourceBase.path, 'resource.txt'), 'utf8'), 'new resource');
+  assert.deepEqual(tokens, ['Bearer first-token', 'Bearer second-token']);
+  const restart = new MarketplaceAdapterProvider(ctx, config, { signal: new AbortController().signal, invalidate() {} });
+  assert.equal((await restart.list()).candidates[0].path, current.path);
+  provider.dispose(); restart.dispose();
+});
+
+test('HTTP failures, timeouts, missing credentials and downgrade redirects reject safely', async (t) => {
+  const { dir } = await fixture(t);
+  const source = normalizeConfig({ url: 'https://archive.test/repo.tar.gz', cachePath: dir });
+  const make = (fetch) => new ArchiveCache(source, { fetch });
+  await assert.rejects(make(async () => new Response('secret body', { status: 403 })).sync(), /archive HTTP 403$/);
+  await assert.rejects(make(async () => new Response('', { headers: { 'content-length': String(33 * 1024 * 1024) } })).sync(), /download size limit/);
+  await assert.rejects(make(async () => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/x?signature=secret' } })).sync(), /requires HTTPS$/);
+  await assert.rejects(new ArchiveCache({ ...source, tokenEnv: 'MISSING' }, { resolveToken: async () => undefined }).sync(), /credential MISSING is not configured/);
+  const origin = await server(t, () => {});
+  await assert.rejects(new ArchiveCache(normalizeConfig({ url: `${origin}/repo.tar.gz`, cachePath: dir, fetchTimeoutMs: 1000 })).sync(), /timed out/);
+});
+
+test('ambient GitHub tokens are ignored unless explicitly referenced', async (t) => {
+  const { dir, bytes } = await fixture(t);
+  const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GH_TOKEN: process.env.GH_TOKEN };
+  process.env.GITHUB_TOKEN = 'ambient-github'; process.env.GH_TOKEN = 'ambient-gh';
+  try {
+    let authorization;
+    const cache = new ArchiveCache(normalizeConfig({ url: 'https://archive.test/repo.tar.gz', cachePath: dir }), { fetch: async (_url, init) => { authorization = init.headers.authorization; return new Response(bytes); } });
+    await cache.sync();
+    assert.equal(authorization, undefined);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   }
 });
 

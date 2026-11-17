@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream, readFileSync, statSync } from 'node:fs';
+import { createWriteStream, readFileSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { createGunzip } from 'node:zlib';
@@ -19,7 +19,6 @@ export function sourceIdentity(value, ref = 'HEAD') {
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
     throw new Error('source URL must use HTTPS (HTTP is allowed only on loopback for tests)');
   }
-  // Query strings are retained for public archive selectors, never for credentials.
   for (const key of url.searchParams.keys()) {
     if (/token|secret|password|signature|credential|api[-_]?key/i.test(key)) throw new Error('source URL must not contain secrets; use tokenEnv');
   }
@@ -71,7 +70,8 @@ export class ArchiveCache {
     let token;
     try {
       if (this.source.tokenEnv) {
-        token = await this.resolveToken(this.source.tokenEnv);
+        try { token = await this.resolveToken(this.source.tokenEnv); }
+        catch { throw new Error(`credential ${this.source.tokenEnv} could not be resolved`); }
         if (!token) throw new Error(`credential ${this.source.tokenEnv} is not configured`);
       }
       const bytes = await this.download(token, controller.signal);
@@ -132,7 +132,8 @@ export class ArchiveCache {
         const location = response.headers.get('location');
         await response.body?.cancel();
         if (!location) throw new Error('archive redirect has no location');
-        const next = new URL(location, url);
+        let next;
+        try { next = new URL(location, url); } catch { throw new Error('invalid archive redirect'); }
         if (next.username || next.password || !['https:', 'http:'].includes(next.protocol)) throw new Error('unsafe archive redirect');
         if (next.protocol === 'http:' && (url.protocol === 'https:' || !['127.0.0.1', 'localhost', '[::1]'].includes(next.hostname))) throw new Error('archive redirect requires HTTPS');
         authorized = authorized && next.origin === url.origin;
@@ -143,10 +144,14 @@ export class ArchiveCache {
       if (Number(response.headers.get('content-length')) > MAX_DOWNLOAD) { await response.body?.cancel(); throw new Error('archive exceeds download size limit'); }
       const chunks = [];
       let size = 0;
-      for await (const chunk of response.body ?? []) {
-        size += chunk.length;
-        if (size > MAX_DOWNLOAD) throw new Error('archive exceeds download size limit');
-        chunks.push(chunk);
+      try {
+        for await (const chunk of response.body ?? []) {
+          size += chunk.length;
+          if (size > MAX_DOWNLOAD) throw new Error('archive exceeds download size limit');
+          chunks.push(chunk);
+        }
+      } catch {
+        throw new Error(size > MAX_DOWNLOAD ? 'archive exceeds download size limit' : signal.aborted ? 'archive download timed out' : 'archive download failed');
       }
       return Buffer.concat(chunks);
     }
@@ -161,11 +166,30 @@ async function validatedRoot(tree) {
   throw new Error('archive has no plugins directory or valid marketplace manifest');
 }
 
+async function validateDirectory(root, directory) {
+  const path = relative(root, directory);
+  if (isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) throw new Error('archive package points outside its root');
+  try { if ((await stat(directory)).isDirectory()) return; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  throw new Error('archive package directory is missing');
+}
+
 async function validTree(root) {
   for (const file of MANIFESTS) {
     let text;
     try { text = await readFile(join(root, file), 'utf8'); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-    if (!Array.isArray(JSON.parse(text)?.plugins)) throw new Error('archive marketplace manifest requires a plugins array');
+    const plugins = JSON.parse(text)?.plugins;
+    if (!Array.isArray(plugins)) throw new Error('archive marketplace manifest requires a plugins array');
+    for (const plugin of plugins) {
+      if (plugin?.source && typeof plugin.source === 'object' && plugin.source.source !== undefined && plugin.source.source !== 'local') continue;
+      const path = typeof plugin?.source === 'string' ? plugin.source : plugin?.source?.path;
+      if (typeof plugin?.name !== 'string' || !plugin.name.trim() || typeof path !== 'string' || !path.trim()) throw new Error('archive package requires a name and local source path');
+      const directory = resolve(root, path);
+      await validateDirectory(root, directory);
+      if (plugin.skills !== undefined) {
+        if (!Array.isArray(plugin.skills) || plugin.skills.some((skill) => typeof skill !== 'string' || !skill.trim())) throw new Error('archive package has invalid skills directories');
+        for (const skill of plugin.skills) await validateDirectory(directory, resolve(directory, skill));
+      }
+    }
     return true;
   }
   try { return (await stat(join(root, 'plugins'))).isDirectory(); }
