@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git 技能插件源",
+    "description": "从插件仓库的 Git 镜像读取技能，保留 Codex、Cursor、Claude Code 共用的仓库结构。"
+  }
+}
