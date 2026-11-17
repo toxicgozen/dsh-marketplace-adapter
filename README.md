@@ -3,6 +3,25 @@
 把 `toxicgozen/skills` 这类「多 agent 共享的命名空间插件仓库」接进 DeepSeek Harness 的下游适配器。
 仓库本身 **一个字节都不用改**，Claude Code / Codex / Cursor / Pi 的安装方式也不受影响。
 
+本仓库是公开的适配器；被适配的技能仓库可以是私有仓，令牌只在本机解析，不随本包分发。
+使用者的路径是「装一个插件、配一次仓库地址」，不需要以开发者身份 clone 技能仓库。
+
+---
+
+## 安装
+
+本包是一个 bundle（`package.json` 里声明了 `dsh.bundle.patch`），把它装进 profile 即可：
+
+```powershell
+git clone https://github.com/toxicgozen/dsh-plugin-adapter.git
+```
+
+然后在 DSH 里用 `plugin_manager` 的 `install_bundle`，`target` 传这个目录的绝对路径。
+本地目录安装是 `link:` 语义，改动即时生效。
+
+装好后默认从 `https://github.com/toxicgozen/skills.git` 拉技能；换成自己的仓库只需在
+profile 的 `cordis.patch.yml` 里覆盖 `repository` / `tokenCommand`（见下文「配置」）。
+
 ---
 
 ## 先搞清四个词
@@ -189,3 +208,7 @@ node --test test/
 
 测试覆盖 frontmatter 解析、目录发现、三种命名空间模式，
 以及（本地存在 checkout 时）对真实仓库做全量链接完整性校验。
+
+## License
+
+[MIT](LICENSE)
