@@ -329,7 +329,8 @@ export function normalizeConfig(raw = {}) {
 
   const repository = normalizeRepository(optionalString(raw.url) ?? optionalString(raw.repository) ?? DEFAULT_REPOSITORY);
   const ref = optionalString(raw.ref) ?? DEFAULT_REF;
-  const mirrorPath = resolve(optionalString(raw.mirrorPath) ?? defaultMirrorPath(repository));
+  const legacyRoot = optionalString(raw.mirrorPath);
+  const mirrorPath = legacyRoot === undefined ? undefined : resolve(legacyRoot);
 
   const namespace = optionalString(raw.namespace) ?? 'plugin';
   if (!NAMESPACES.includes(namespace)) {
@@ -457,19 +458,6 @@ function optionalNumber(value, fallback, minimum) {
     throw new Error(`marketplace-adapter: expected a number >= ${minimum}, got ${String(value)}`);
   }
   return value;
-}
-
-export function defaultMirrorPath(repository) {
-  const home = optionalString(process.env.DSH_HOME) ?? join(homedir(), '.dsh');
-  const tail = String(repository)
-    .replace(/[\\/]+$/, '')
-    .replace(/\.git$/, '')
-    .split(/[\\/:]+/)
-    .filter((part) => part.length > 0)
-    .slice(-2)
-    .join('-');
-  const slug = tail.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  return join(home, 'skill-mirrors', slug === '' ? 'skills' : slug);
 }
 
 export function defaultStorePath() {
@@ -728,6 +716,7 @@ export async function collectSkillCandidates(config, hooks = {}) {
 }
 
 async function listPackages(config, onWarning) {
+  if (config.mirrorPath === undefined) return { packages: [], complete: false };
   const declared = await packagesFromMarketplace(config, onWarning);
   if (declared !== undefined) return { packages: declared, complete: true };
   return packagesFromPluginsDir(config);
@@ -920,7 +909,7 @@ export function parseFrontmatter(text) {
 
   let close = -1;
   for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index].trim();
+    const line = lines[index].trimEnd();
     if (line === '---' || line === '...') {
       close = index;
       break;

@@ -2,7 +2,7 @@ import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseFrontmatter, parseSkillDocument, normalizeConfig, defaultMirrorPath } from '../index.js';
+import { parseFrontmatter, parseSkillDocument, normalizeConfig } from '../index.js';
 
 test('indented YAML separators remain in the description and preserve following invocation fields', () => {
   for (const separator of ['---', '...']) {
@@ -106,15 +106,10 @@ test('carries whenToUse through', () => {
   assert.equal(result.skill.whenToUse, 'When writing tests.');
 });
 
-test('defaults the mirror inside DSH_HOME', () => {
-  const previous = process.env.DSH_HOME;
-  process.env.DSH_HOME = 'C:\\Users\\example\\.dsh';
-  try {
-    assert.match(defaultMirrorPath('https://github.com/toxicgozen/skills.git'), /skill-mirrors[\\/]toxicgozen-skills$/);
-  } finally {
-    if (previous === undefined) delete process.env.DSH_HOME;
-    else process.env.DSH_HOME = previous;
-  }
+test('legacy roots are opt-in and new cache roots are independent', () => {
+  const config = normalizeConfig({ url: 'example/skills' });
+  assert.equal(config.mirrorPath, undefined);
+  assert.match(config.cachePath, /marketplace-adapter[\\/]snapshots$/);
 });
 
 test('rejects an unknown namespace and the reserved provider name', () => {
