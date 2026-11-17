@@ -1,9 +1,21 @@
 import './setup.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parseDocument } from 'yaml';
+
+test('the shipped bundle selects HTTP URL and the remote default branch through Config', async () => {
+  const patch = parseDocument(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')).toJS();
+  const raw = patch[0].insert[0].config;
+  assert.equal(raw.url, 'https://github.com/toxicgozen/skills');
+  assert.equal(raw.sslBackend, undefined);
+  const source = normalizeBundleConfig(Config(raw)).marketplaces[0];
+  assert.equal(source.url, raw.url);
+  assert.equal(source.ref, 'HEAD');
+  assert.equal(source.mirrorPath, undefined);
+});
 
 import { Config, collectSkillCandidates, normalizeBundleConfig, normalizeConfig, normalizeRepository } from '../index.js';
 
@@ -154,7 +166,9 @@ test('a flat repository becomes one named marketplace and shared fields reach ea
   assert.equal(many[0].namespace, 'none', 'shared defaults reach each entry');
   assert.equal(many[1].ref, 'release');
   assert.equal(many[1].providerName, 'work');
-  assert.notEqual(many[0].mirrorPath, many[1].mirrorPath, 'each marketplace owns its working copy');
+  assert.equal(many[0].mirrorPath, undefined);
+  assert.equal(many[1].mirrorPath, undefined);
+  assert.equal(many[0].cachePath, many[1].cachePath, 'source identities isolate snapshots under the shared cache root');
 });
 
 test('invalid marketplace declarations are rejected before anything starts', () => {
