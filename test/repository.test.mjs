@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 
 import { collectSkillCandidates, normalizeConfig, SKILL_NAME } from '../index.js';
 
-const CHECKOUT = process.env.SKILL_PLUGINS_REPO ?? 'C:\\Users\\10202\\Projects\\skills';
+const CHECKOUT = process.env.SKILL_ADAPTER_REPO ?? 'C:\\Users\\10202\\Projects\\skills';
 const MIRROR = join(CHECKOUT, 'plugins');
 
 async function available() {

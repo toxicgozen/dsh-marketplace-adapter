@@ -1,16 +1,16 @@
 {
-  "name": "@local/dsh-skill-plugins",
+  "name": "@toxicgozen/dsh-skill-adapter",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Serves skills from a Git mirror of the toxicgozen/skills plugin repository as namespaced DSH skills.",
+  "description": "Serves skills from a Git mirror of a packaged skill repository as namespaced DSH skills.",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "bin": {
-    "dsh-skill-plugins-sync": "./bin/sync.mjs"
+    "dsh-skill-adapter-sync": "./bin/sync.mjs"
   },
   "files": [
     "index.js",

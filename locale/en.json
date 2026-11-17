@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Git Skill Plugins",
-    "description": "Serves skills from a Git mirror of a namespaced plugin repository, keeping the repository layout that Codex, Cursor and Claude Code use."
+    "title": "Git Skill Adapter",
+    "description": "Serves skills from a Git mirror of a packaged skill repository, keeping the repository layout that Codex, Cursor and Claude Code use."
   }
 }

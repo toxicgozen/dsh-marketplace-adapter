@@ -1,4 +1,4 @@
-# @local/dsh-skill-plugins
+# @toxicgozen/dsh-skill-adapter
 
 把 `toxicgozen/skills` 这类「多 agent 共享的命名空间插件仓库」接进 DeepSeek Harness 的下游适配器。
 仓库本身 **一个字节都不用改**，Claude Code / Codex / Cursor / Pi 的安装方式也不受影响。
@@ -13,7 +13,7 @@
 本包是一个 bundle（`package.json` 里声明了 `dsh.bundle.patch`），把它装进 profile 即可：
 
 ```powershell
-git clone https://github.com/toxicgozen/dsh-plugin-adapter.git
+git clone https://github.com/toxicgozen/dsh-skill-adapter.git
 ```
 
 然后在 DSH 里用 `plugin_manager` 的 `install_bundle`，`target` 传这个目录的绝对路径。
@@ -65,8 +65,8 @@ DSH 的 profile（这里是 `desktop`）由若干 bundle 叠加而成。`install
 
 ```yaml
 - insert:
-    - id: skill-plugins
-      name: '@local/dsh-skill-plugins'
+    - id: skill-adapter
+      name: '@toxicgozen/dsh-skill-adapter'
 ```
 
 ### 3. plugin（插件行）
@@ -77,6 +77,9 @@ bundle 装的是"包"，**plugin 是 loader 树里的一行**，也就是一个�
 export const inject = ['skills'];
 export function apply(ctx, config) { /* 注册 provider */ }
 ```
+
+上游技能仓库里 `plugins/<name>/` 是另一个"plugin"概念——那是技能仓库自己的包目录。
+本插件只把目录名当作命名空间前缀，不加载、不执行它。
 
 ### 4. provider（技能来源）
 
@@ -124,8 +127,8 @@ DSH 硬约束，不是本插件的选择：
 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里按 id 覆盖（覆盖会替换**整个** `config`，要写全）：
 
 ```yaml
-- id: skill-plugins
-  name: '@local/dsh-skill-plugins'
+- id: skill-adapter
+  name: '@toxicgozen/dsh-skill-adapter'
   config:
     repository: https://github.com/toxicgozen/skills.git
     ref: main

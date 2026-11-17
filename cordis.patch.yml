@@ -1,15 +1,15 @@
-# Bundle patch for @local/dsh-skill-plugins.
+# Bundle patch for @toxicgozen/dsh-skill-adapter.
 #
 # This inserts one Host row. Override it by id from the profile's own
 # cordis.patch.yml; a matching override replaces the complete `config`,
 # so restate every field you still want.
 - insert:
-    - id: skill-plugins
-      name: '@local/dsh-skill-plugins'
+    - id: skill-adapter
+      name: '@toxicgozen/dsh-skill-adapter'
       config:
         repository: https://github.com/toxicgozen/skills.git
         ref: main
-        # Full plugin directory name as the skill-name prefix:
+        # Full package directory name as the skill-name prefix:
         # plugins/gozen-stack/skills/code-review -> gozen-stack-code-review
         namespace: plugin
         # `auto` uses the system TLS backend and only retries with OpenSSL when

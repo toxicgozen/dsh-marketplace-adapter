@@ -13,7 +13,7 @@
  * (`references/…`, `../<sibling>/SKILL.md`, `../../playbooks/…`) still resolves
  * against the real directory tree.
  *
- * @module @local/dsh-skill-plugins
+ * @module @toxicgozen/dsh-skill-adapter
  */
 
 import { execFile } from 'node:child_process';
@@ -96,7 +96,7 @@ export function apply(ctx, config = {}) {
  */
 export function normalizeConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new TypeError('skill-plugins: config must be an object');
+    throw new TypeError('skill-adapter: config must be an object');
   }
 
   const repository = optionalString(raw.repository) ?? DEFAULT_REPOSITORY;
@@ -105,17 +105,17 @@ export function normalizeConfig(raw = {}) {
 
   const namespace = optionalString(raw.namespace) ?? 'plugin';
   if (!NAMESPACES.includes(namespace)) {
-    throw new Error(`skill-plugins: namespace must be one of ${NAMESPACES.join(', ')} (got "${namespace}")`);
+    throw new Error(`skill-adapter: namespace must be one of ${NAMESPACES.join(', ')} (got "${namespace}")`);
   }
 
   const sslBackend = optionalString(raw.sslBackend) ?? 'auto';
   if (!SSL_BACKENDS.includes(sslBackend)) {
-    throw new Error(`skill-plugins: sslBackend must be one of ${SSL_BACKENDS.join(', ')} (got "${sslBackend}")`);
+    throw new Error(`skill-adapter: sslBackend must be one of ${SSL_BACKENDS.join(', ')} (got "${sslBackend}")`);
   }
 
   const providerName = optionalString(raw.providerName) ?? DEFAULT_PROVIDER;
   if (providerName === 'runtime') {
-    throw new Error('skill-plugins: providerName "runtime" is reserved by the skill registry');
+    throw new Error('skill-adapter: providerName "runtime" is reserved by the skill registry');
   }
 
   return {
@@ -142,7 +142,7 @@ export function normalizeConfig(raw = {}) {
 function normalizePlugins(value) {
   if (value === undefined || value === null) return { include: [], exclude: [] };
   if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('skill-plugins: plugins must be an object with optional include/exclude arrays');
+    throw new Error('skill-adapter: plugins must be an object with optional include/exclude arrays');
   }
   return {
     include: stringArray(value.include, 'plugins.include'),
@@ -153,7 +153,7 @@ function normalizePlugins(value) {
 function stringArray(value, field) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) {
-    throw new Error(`skill-plugins: ${field} must be an array of non-empty strings`);
+    throw new Error(`skill-adapter: ${field} must be an array of non-empty strings`);
   }
   return [...value];
 }
@@ -164,7 +164,7 @@ function normalizeTokenCommand(value) {
   if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === 'string' && part.length > 0)) {
     return [...value];
   }
-  throw new Error('skill-plugins: tokenCommand must be a non-empty string array, or "none"');
+  throw new Error('skill-adapter: tokenCommand must be a non-empty string array, or "none"');
 }
 
 function optionalString(value) {
@@ -173,14 +173,14 @@ function optionalString(value) {
 
 function optionalBoolean(value, fallback) {
   if (value === undefined || value === null) return fallback;
-  if (typeof value !== 'boolean') throw new Error(`skill-plugins: expected a boolean, got ${typeof value}`);
+  if (typeof value !== 'boolean') throw new Error(`skill-adapter: expected a boolean, got ${typeof value}`);
   return value;
 }
 
 function optionalNumber(value, fallback, minimum) {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum) {
-    throw new Error(`skill-plugins: expected a number >= ${minimum}, got ${String(value)}`);
+    throw new Error(`skill-adapter: expected a number >= ${minimum}, got ${String(value)}`);
   }
   return value;
 }
@@ -260,7 +260,7 @@ export class GitMirror {
       const text = message(error);
       const tlsFailure = /schannel|SEC_E_NO_CREDENTIALS|AcquireCredentialsHandle/i.test(text);
       if (this.config.sslBackend === 'auto' && tlsFailure) {
-        this.logger.info('skill-plugins: retrying Git with http.sslBackend=openssl');
+        this.logger.info('skill-adapter: retrying Git with http.sslBackend=openssl');
         return this.execGit(args, timeoutMs, true);
       }
       throw error;
@@ -355,7 +355,7 @@ export class GitMirror {
         this.tokenState = { value: undefined, resolved: true };
         return undefined;
       }
-      const text = `skill-plugins: token command failed: ${message(error)}`;
+      const text = `skill-adapter: token command failed: ${message(error)}`;
       if (this.tokenWarning !== text) {
         this.tokenWarning = text;
         this.logger.warn(text);
@@ -533,7 +533,7 @@ export class SkillPluginsProvider {
     if (this.warned.has(key)) return;
     if (this.warned.size > 200) this.warned.clear();
     this.warned.add(key);
-    this.ctx.logger.warn(`skill-plugins: ${key}`);
+    this.ctx.logger.warn(`skill-adapter: ${key}`);
   }
 
   runSyncIfDue(now = this.now()) {
@@ -566,12 +566,12 @@ export class SkillPluginsProvider {
       this.state.consecutiveFailures = 0;
       this.state.lastError = undefined;
       this.control.invalidate();
-      this.ctx.logger.info(`skill-plugins: ${config.repository}@${config.ref} at ${revision}`);
+      this.ctx.logger.info(`skill-adapter: ${config.repository}@${config.ref} at ${revision}`);
     } catch (error) {
       this.state.consecutiveFailures += 1;
       this.state.lastError = message(error);
       const delay = Math.round(backoffDelayMs(this.state.consecutiveFailures) / 1000);
-      this.ctx.logger.warn(`skill-plugins: sync failed (${this.state.lastError}); retry in ${delay}s`);
+      this.ctx.logger.warn(`skill-adapter: sync failed (${this.state.lastError}); retry in ${delay}s`);
     } finally {
       this.state.lastAttemptAt = this.now();
       await lock.release();

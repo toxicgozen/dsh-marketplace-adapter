@@ -9,7 +9,7 @@ import { collectSkillCandidates, normalizeConfig } from '../index.js';
 const SKILL = (name, description, extra = '') => `---\nname: ${name}\ndescription: ${description}\n${extra}---\n\n# ${name}\n`;
 
 async function makeMirror() {
-  const root = await mkdtemp(join(tmpdir(), 'skill-plugins-'));
+  const root = await mkdtemp(join(tmpdir(), 'skill-adapter-'));
   const mirror = join(root, 'mirror');
 
   const alpha = join(mirror, 'plugins', 'alpha-stack');
@@ -130,7 +130,7 @@ test('honours include and exclude filters', async (t) => {
 });
 
 test('reports an incomplete observation before the mirror exists', async () => {
-  const missing = join(tmpdir(), 'skill-plugins-does-not-exist', 'mirror');
+  const missing = join(tmpdir(), 'skill-adapter-does-not-exist', 'mirror');
   const result = await collectSkillCandidates(normalizeConfig({ mirrorPath: missing }));
   assert.deepEqual(result, { candidates: [], complete: false });
 });
