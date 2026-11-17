@@ -4,6 +4,16 @@ import assert from 'node:assert/strict';
 
 import { parseFrontmatter, parseSkillDocument, normalizeConfig, defaultMirrorPath } from '../index.js';
 
+test('indented YAML separators remain in the description and preserve following invocation fields', () => {
+  for (const separator of ['---', '...']) {
+    const parsed = parseSkillDocument(`---\nname: alpha\ndescription: |\n  First line.\n  ${separator}\n  Last line.\nuser-invocable: false\n---  \nBody.`);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.skill.invocation.userInvocable, false);
+    assert.equal(parsed.skill.description, `First line.\n${separator}\nLast line.`);
+    assert.equal(parsed.skill.body, 'Body.');
+  }
+});
+
 test('uses complete YAML semantics and reports malformed documents', () => {
   const parsed = parseSkillDocument('---\nname: alpha # comment\ndescription: >-\n  first line\n  second line\nwhenToUse: "\\u4e2d\\u6587"\npaths:\n  - "**/*.ts"\n---\nBody.');
   assert.equal(parsed.ok, true);
