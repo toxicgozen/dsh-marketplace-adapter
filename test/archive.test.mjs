@@ -1,3 +1,4 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeConfig } from '../index.js';
@@ -92,6 +93,22 @@ test('downloads and publishes a complete immutable tree; failure keeps last-good
   await assert.rejects(cache.sync());
   assert.deepEqual(await new ArchiveCache(source).current(), first);
   assert.equal(await readFile(resource, 'utf8'), 'old resource');
+});
+
+test('a broken local package declaration cannot replace the last-good snapshot', async (t) => {
+  const { dir, bytes } = await fixture(t);
+  let body = bytes;
+  const cache = new ArchiveCache(normalizeConfig({ url: 'https://archive.test/repo.tar.gz', cachePath: join(dir, 'cache') }), { fetch: async () => new Response(body) });
+  const first = await cache.sync();
+  await mkdir(join(dir, 'repo/.claude-plugin'), { recursive: true });
+  for (const entry of [{ name: 'missing', source: './missing' }, { name: 'outside', source: '../outside' }, { name: 'no-source' }]) {
+    await writeFile(join(dir, 'repo/.claude-plugin/marketplace.json'), JSON.stringify({ plugins: [entry] }));
+    const archive = join(dir, 'bad.tar.gz');
+    await tar.c({ file: archive, gzip: true, cwd: dir }, ['repo']);
+    body = await readFile(archive);
+    await assert.rejects(cache.sync(), /package/);
+    assert.deepEqual(await cache.current(), first);
+  }
 });
 
 test('URL is the source identity and its default ref follows the remote default', () => {
