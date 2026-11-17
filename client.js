@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
       emptyTitle: '还没有接入 marketplace',
       empty: '用 /marketplace add <owner/repo> 添加一个；加入后的技能会出现在技能列表里。',
       hint: '添加、移除和同步使用 /marketplace 命令。',
-      revision: 'Revision',
+      revision: 'Snapshot',
       lastSync: '最后同步',
       never: '从未',
       notSynced: '尚未同步',
@@ -69,7 +69,7 @@ window.__ModuleLoader__.load({
       emptyTitle: 'No marketplace is adapted yet',
       empty: 'Add one with /marketplace add <owner/repo>; its skills appear in the skill list afterwards.',
       hint: 'Add, remove and sync with the /marketplace command.',
-      revision: 'Revision',
+      revision: 'Snapshot',
       lastSync: 'Last sync',
       never: 'Never',
       notSynced: 'Not synced yet',
@@ -227,7 +227,7 @@ window.__ModuleLoader__.load({
       const packages = Array.isArray(marketplace.packages) ? marketplace.packages : [];
       const skills = packages.reduce((total, item) => total + item.skills, 0);
       const pairs = [
-        [t('revision'), marketplace.revision === null ? t('notSynced') : marketplace.revision.slice(0, 7)],
+        [t('revision'), marketplace.revision === null ? t('notSynced') : marketplace.revision.replace(/^sha256:/, '').slice(0, 12)],
         [t('lastSync'), marketplace.lastSync === null ? t('never') : (formatTime(marketplace.lastSync) ?? t('never'))],
         [t('packageCount'), String(packages.length)],
         [t('skillCount'), String(skills)],

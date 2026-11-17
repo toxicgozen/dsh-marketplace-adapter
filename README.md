@@ -1,203 +1,103 @@
 # dsh-marketplace-adapter
 
-在 DeepSeek Harness 里用你的 agent marketplace —— Claude Code / Codex / Cursor 那套
-`plugins/<包>/skills/<技能>/SKILL.md` 仓库。
+把 GitHub 上或 HTTPS tar.gz 归档中的 agent marketplace 接入 DeepSeek Harness。技能保留完整资源目录，名称默认加包名前缀，例如 `gozen-stack-code-review`。
 
-装一次、填一个 `owner/repo`，技能就带着包名前缀出现在 DSH 里，之后跟着上游自动更新。
-仓库本身不用改，其它宿主的安装方式也不受影响。
+## 配置来源
 
----
-
-## 用
-
-在输入框输入 `/marketplace`：
-
-```
-marketplace  gozen  https://github.com/toxicgozen/skills.git@main
-revision     8f2c1ab
-last sync    2026/11/18 00:52:11
-packages     7
-
-  gozen-stack          0.15.41    46 skills
-  art-stack            0.9.3      12 skills
-```
-
-技能名带包名前缀，所以"跑 code-review"在 DSH 里是 `gozen-stack-code-review`。
-
-左侧栏还有一个 **Marketplace** 入口，点开是一页卡片：每个来源的 repository@ref、revision、
-最后同步时间、包与技能数，以及失败原因；右上角可以刷新。添加、移除和同步仍然用命令，
-页面只读，两边不各写一套逻辑。
-
-## 添加、移除、同步
-
-```
-/marketplace add owner/repo          # 添加一个 marketplace
-/marketplace add owner/repo work     # 添加并起名 work
-/marketplace remove work             # 移除
-/marketplace sync [name]             # 立刻同步
-```
-
-命令添加的条目写进 `~/.dsh/marketplace-adapter/marketplaces.json`，立刻生效、重启后仍在。
-配置里声明的条目也能被 `remove` 停用：它写一条墓碑，不改你的配置文件；再 `add` 同一个仓库就恢复。
-
-也可以直接改配置（多个仓库并列）：
+在插件配置中填写 URL。GitHub 来源也接受 `owner/repo`：
 
 ```yaml
-- id: marketplace-adapter
-  config:
-    marketplaces:
-      - name: gozen
-        repository: toxicgozen/skills
-      - name: work
-        repository: https://github.com/example/skills.git
-        ref: main
+marketplaces:
+  - name: public
+    url: anthropics/skills
+  - name: work
+    url: https://github.com/example/private-skills
+    ref: release
+    tokenEnv: WORK_SKILLS_TOKEN
+  - name: archive
+    url: https://example.com/releases/skills.tar.gz
 ```
 
-私有仓要求本机 `gh auth status` 是登录状态；令牌只在本机解析，不落盘、不进日志。
+`tokenEnv` 是环境变量名，不是令牌内容。DSH 存在 credentials service 时，每次同步调用 `credentials.resolve(tokenEnv)`；没有该 service 时读取 `process.env[tokenEnv]`。已配置引用却无法解析时，同步失败并保留旧快照。插件不自动读取 `GITHUB_TOKEN`、`GH_TOKEN`、Git 凭据或 `gh` 登录状态。
 
-## 安装（第一次）
+URL 不得包含用户名、密码、fragment 或秘密查询参数。公开归档选择器的非秘密 query 会保留，并参与来源身份计算。需要认证时使用 `tokenEnv`，不要使用临时签名 URL。
+
+## 添加、移除和同步
+
+```text
+/marketplace add anthropics/skills
+/marketplace add https://example.com/releases/skills.tar.gz work
+/marketplace remove work
+/marketplace sync [name]
+/marketplace
+```
+
+命令写入 `$DSH_HOME/marketplace-adapter/marketplaces.json`，默认 DSH home 为 `~/.dsh`。`add` 仅保存名称和 URL，其余选项继承共享配置。私有来源可在配置中声明 `tokenEnv`，没有新增秘密输入界面。
+
+`remove` 精确匹配最终显示的名称。移除配置声明的来源会写入停用记录，不改配置文件；用同名 `add` 恢复。损坏的 Store 可被读取阶段跳过并记录警告，后续写入会拒绝覆盖，需先修复原文件。
+
+左侧栏 **Marketplace** 页面显示来源、快照摘要、同步状态和包列表。页面上的刷新重新读取状态；立即同步使用 `/marketplace sync`。手动同步失败时命令返回错误。
+
+## 同步与缓存
+
+GitHub 仓库映射到官方 `/repos/{owner}/{repo}/tarball` API。`ref: HEAD` 表示使用远端默认分支，请求省略 ref；指定分支、tag 或提交时附加该选择器。其他 host 必须提供直接 `.tar.gz` 或 `.tgz` URL，插件不会猜测任意 Git 服务的归档接口。
+
+每次同步下载到独立 staging，校验后发布不可变目录，再用临时文件加 rename 替换 `current.json`。provider 最后切换 root。失败保留上一份完整快照；重启读取 last-good。旧 candidate 仍指向原目录，已加载技能的相对资源路径继续有效。
+
+缓存按完整规范 URL 和 ref 的 SHA-256 来源键隔离。`revision` 的格式是 `sha256:<归档内容摘要>`，它是快照摘要，不是 Git commit SHA。归档字节改变会产生新 revision，即使解压内容相同。缓存不会自动清理，避免删除正在被会话读取的资源；停用来源也不删除快照。
+
+| 配置 | 默认 | 含义 |
+|---|---|---|
+| `marketplaces` | `[]` | 多来源；空时使用顶层单来源配置 |
+| `url` | `https://github.com/toxicgozen/skills` | GitHub 仓库或直接 HTTPS 归档 URL；默认来源可能需要凭据 |
+| `repository` | — | `url` 的兼容别名，二者同时给出时 `url` 优先 |
+| `name` | 从 URL 推导 | 来源稳定名称 |
+| `ref` | `HEAD` | 共享默认值在逐项配置合并后生效；直接归档由 URL 决定下载内容，ref 仅参与缓存隔离 |
+| `tokenEnv` | — | POSIX 环境变量名，逐次解析 |
+| `cachePath` | `$DSH_HOME/marketplace-adapter/snapshots` | 缓存根；可在顶层安全共享，内部按来源键隔离 |
+| `mirrorPath` | 旧 `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 首次同步前的只读兼容目录；迁移行为见下文 |
+| `storePath` | `$DSH_HOME/marketplace-adapter/marketplaces.json` | 命令拥有的来源列表 |
+| `syncOnApply` | `true` | `false` 时不自动同步，仅提供已有快照或旧目录 |
+| `syncIntervalMinutes` | `60` | `0` 时启动最多同步一次，失败也不自动重试；仍可手动同步 |
+| `fetchTimeoutMs` | `180000` | 一次 HTTP 下载的超时，最小 1000 ms |
+| `namespace` | `plugin` | `plugin` 全加包前缀；`collision` 仅重名加前缀；`none` 使用原名 |
+| `descriptionPrefix` | `false` | 描述前添加 `[包名]` |
+| `respectDisableModelInvocation` | `true` | 遵循技能的模型调用开关 |
+| `plugins.include`、`plugins.exclude` | `[]` | 按包名筛选 |
+| `providerName` | 来源名称 | DSH provider 名称，不能为 `runtime` |
+| `rank` | `300` | 重名技能优先级 |
+
+顶层字段为每项默认值；`name`、`providerName` 和旧 `mirrorPath` 按项指定。常规失败按 15 秒、30 秒、60 秒逐步退避，最多 5 分钟。同一 provider 的同步单飞；跨进程发布相同摘要不会改动现有资源。Store 使用 `proper-lockfile` 保护整个读改写事务。
+
+## 从 0.1.x 迁移
+
+0.2.0 完全移除 marketplace 的 Git clone、fetch 和 reset。`gitPath`、`sslBackend`、`tokenCommand` 被忽略；SSH Git URL 和非 GitHub 的普通 Git URL不再支持。改填 GitHub HTTPS URL 或直接 HTTPS 归档，并用 `tokenEnv` 显式引用凭据。
+
+旧 `repository` 仍可读取。旧 clone 只读保留，插件不搬动、重置或删除它；第一次 HTTP 同步成功后改为读取快照。如果显式指定旧 `mirrorPath` 且没有 `cachePath`，新缓存放在相邻的 `<mirrorPath>.archives`，避免写入旧 clone。建议新配置直接使用 `cachePath`。新缓存目录不会被当成旧 clone 扫描。
+
+默认 ref 从 `main` 改为 `HEAD`，因此遵循仓库默认分支。若仍需固定 `main`，显式填写 `ref: main`。v1 Store 保持兼容，只写支持的非秘密字段。
+
+## 发现规则与边界
+
+按顺序读取 `.claude-plugin/marketplace.json`、`.cursor-plugin/marketplace.json`、`.agents/plugins/marketplace.json`，没有清单时扫描 `plugins/<包>/skills/<技能>/SKILL.md`。本地包 source 可为字符串、`{ source: local, path: ... }`，或无 discriminator 的 `{ path: ... }`。包可指向仓库根 `./`；显式 `skills` 目录列表只选择该包列出的技能。`url`、`git-subdir` 等远程组件 source 会警告并跳过。
+
+新归档发布前校验目录与本地包声明；目录缺失、越界或损坏清单不能替换 last-good。合法空清单允许发布。插件元数据依次读取 `.codex-plugin/plugin.json`、`.claude-plugin/plugin.json`、`.cursor-plugin/plugin.json`，最后兼容根 `plugin.json`。
+
+frontmatter 使用 `yaml.parseDocument`，支持标准 YAML 结构、引号、注释和多行文本；语法错误带诊断。发现技能时，缺省 `name` 可用技能目录名补齐。DSH 名称只允许小写字母、数字和连字符。保留 `disable-model-invocation`、`user-invocable` 的 DSH 调用语义；不支持的宿主字段会警告。hooks、条件激活和完整安装市场不在本插件范围内。
+
+下载限制为 32 MiB，解压后的 tar 为 128 MiB，最多 20000 个条目。绝对路径、`..`、Windows 驱动路径、symlink、hardlink 和特殊文件会被拒绝。HTTP 仅允许 loopback 测试来源，生产来源必须 HTTPS。重定向手动跟随，最多 5 次；跨 origin 永久移除 Authorization，拒绝 HTTPS 降级。失败仅报告状态和诊断，不记录响应 body 或临时重定向 URL。
+
+## CLI 与开发
 
 ```powershell
-git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
+pnpm install --frozen-lockfile
+npm test
+node bin/sync.mjs --url anthropics/skills --cachePath D:\cache\marketplaces
+node bin/sync.mjs --url example/private-skills --ref release --tokenEnv WORK_SKILLS_TOKEN
 ```
 
-在 DSH 的 **Settings → Plugins** 里用 Plugin Manager 安装上面这个目录（`install_bundle`，
-`target` 传绝对路径）。本地目录是 `link:` 安装，以后 `git pull` 就升级。
+CLI 使用相同 HTTP 缓存，输出快照 root、完整摘要、来源键和技能数。`--help` 列出支持的参数。
 
----
-
-## 你会得到什么
-
-| 位置 | 内容 |
-|---|---|
-| 左侧栏 **Marketplace** | 每个来源的 revision、同步状态、包版本与技能数；右上角刷新 |
-| `/marketplace` | 每个仓库的 revision、最后同步时间、各包版本与技能数 |
-| `/marketplace add <owner/repo> [name]` | 添加并立刻挂载 |
-| `/marketplace remove <name>` | 移除命令添加的条目 |
-| `/marketplace sync [name]` | 全部同步，或只同步指定 marketplace |
-| 技能目录 | `gozen-stack-*`、`art-stack-*` …前缀就是 marketplace 里的包名 |
-| 日志 | 同步失败会写原因，并按 15s → 30s → … → 5min 退避重试 |
-
-每 60 分钟自动同步。刷新由插件自己的定时器驱动，不依赖你重开会话。
-
-## 已知限制
-
-- DSH 读不懂的 frontmatter（`paths:`、`globs`、`allowed-tools`、`hooks`…）会被忽略并 warn，
-  同一个技能在这里的行为可能和别的宿主不同。
-- hooks、斜杠命令、条件激活：DSH 没有对应语义，本插件不模拟。
-- 多个 marketplace 里同名技能不会合并：注册表按 `rank` 再按注册顺序取第一个，其余告警丢弃。
-
----
-
-## 给维护者
-
-以下是机制和取舍，不是使用步骤。
-
-### 它读什么
-
-优先读仓库自带的 marketplace 清单，按顺序取第一个能用的：
-
-| 清单 | 谁在用 |
-|---|---|
-| `.claude-plugin/marketplace.json` | Claude Code |
-| `.cursor-plugin/marketplace.json` | Cursor |
-| `.agents/plugins/marketplace.json` | Codex |
-
-清单里的 `plugins[].name` 是包名（技能前缀）；`source` 是包目录，相对仓库根，
-字符串和 `{ "path": … }` 两种写法都认。读不到清单才退回扫 `plugins/<包>/skills/`。
-清单写坏了只 warn 并退回扫目录，不会清空 catalog；指向仓库外的包会被忽略。
-
-### 为什么名字里只能用 `-`
-
-DSH 硬约束，不是本插件的选择：
-
-| 位置 | 正则 | 出处 |
-|---|---|---|
-| skill 名 | `/^[a-z0-9]+(?:-[a-z0-9]+)*$/` | `dsh-skill/lib/index.js:17` |
-| command 名 | `/^[a-z][a-z0-9_-]*$/u` | `dsh-commands/lib/index.js:78` |
-
-`gozen:code-review`、`gozen/code-review`、`gozen.code-review` 全部非法。而且坏名字不是
-"跳过这一个"——`validateCandidate()` 在 `provider.list()` 的 try/catch 之外，一个坏名字会把
-整个 provider 的 catalog 打挂，所以本插件自己先校验，坏名只警告、不抛。
-
-命名空间只能用 `-` 编码：
-
-| `namespace` | `plugins/gozen-stack/skills/code-review` 变成 |
-|---|---|
-| `plugin`（默认） | `gozen-stack-code-review` |
-| `collision` | `code-review`；只有重名时才加前缀 |
-| `none` | `code-review`（与 Claude/Codex 一致） |
-
-### 结构
-
-```
-repo ──git fetch──► mirror ──provider──► ctx.skills ──► 模型 catalog
-                                        (name 加前缀，路径不动)
-```
-
-- **mirror**：`~/.dsh/skill-mirrors/<owner>-<repo>/`，只读普通 clone；插件启动、定时和
-  `/marketplace sync` 时 `fetch` + `reset --hard`，其余时间只读本地文件。断网也能用。
-- **provider**：`ctx.skills.registerProvider`，只改 `name`、不动磁盘，所以技能里的相对引用
-  （`references/x.md`、`../<兄弟技能>/SKILL.md`、`../../playbooks/x.md`）全部照旧。
-- **页面**：`client.js` 在 `sidebar.panellist` 注册 `marketplace` 行、在 `main` 的 `marketplace`
-  键注册页面。页面用 `fetch` 读 Host 的 `/api/marketplace-adapter/status`——`describeMarketplaces()`
-  的快照，没有 Typert Remote 契约要生成。读取失败时保留上一份快照并给出重试。
-- **Host 路由**：`connection.fetch.register` 挂在 Web 端已认证的 `/api` 通道上；没有 Web 载体
-  （纯 CLI）时不注册，页面也就无从打开，插件其余部分不受影响。
-- **bundle / plugin 行**：本包是 bundle，`cordis.patch.yml` 插一行 `marketplace-adapter`。
-
-### 配置
-
-在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里按 id 覆盖（覆盖会替换**整个** `config`，要写全）：
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `marketplaces` | — | 并列的源列表，每项见下；给了它就不再读顶层 `repository` |
-| `repository` | `https://github.com/toxicgozen/skills.git` | 只有一个源时的简写；也接受 `owner/repo` |
-| `name` | `<owner>-<repo>` | marketplace 的稳定 id，出现在 `/marketplace`、日志与 provider 名里 |
-| `ref` | `main` | 跟踪的分支或 tag |
-| `mirrorPath` | `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 本地镜像目录 |
-| `storePath` | `$DSH_HOME/marketplace-adapter/marketplaces.json` | `/marketplace add` 写入的列表 |
-| `namespace` | `plugin` | `plugin` / `collision` / `none` |
-| `descriptionPrefix` | `false` | 描述前加 `[包名]`，让 catalog 可见命名空间 |
-| `respectDisableModelInvocation` | `true` | `false` 时强制所有技能可被模型调用 |
-| `plugins.include` / `plugins.exclude` | `[]` | 按包名收窄 |
-| `syncOnApply` | `true` | 加载时同步；`false` 只读 mirror |
-| `syncIntervalMinutes` | `60` | 成功后的刷新间隔；`0` 关闭定时刷新与失败重试 |
-| `sslBackend` | `auto` | `auto` / `openssl` / `schannel` |
-| `gitPath` | `git` | git 可执行文件 |
-| `tokenCommand` | `['gh','auth','token']` | 令牌来源；`"none"` 关闭 |
-| `providerName` | marketplace 的 `name` | 注册在 `ctx.skills` 上的 provider 名，必须唯一 |
-| `rank` | `300` | 同层重名的优先级 |
-
-`marketplaces` 的每一项接受上表除 `marketplaces` 外的字段；顶层字段作为每一项的默认值，
-但 `mirrorPath`、`providerName`、`name` 始终按项取，避免两个源共用同一份工作副本。
-
-### 刷新、重试与多实例
-
-- 刷新由定时器驱动（每 15 秒检查一次）。不能靠 catalog 重新读取来驱动——DSH 注册表会缓存
-  provider 的 `list()`，热会话里它不会被再次调用。
-- 成功后按 `syncIntervalMinutes` 等下一轮；失败按 15s → 30s → 60s … 最长 5 分钟退避，
-  不会一次失败就干等一个整间隔。
-- 同一个 mirror 上只有一个实例在同步：另一个窗口拿不到锁就跳过这一轮，保留现有 catalog。
-- 令牌只在拿到确定结果时缓存，`gh auth token` 这一轮失败下一轮会重试。
-
-### 认证与 Git 传输
-
-`sslBackend: auto` 先按系统后端跑，只在命中 schannel `SEC_E_NO_CREDENTIALS` 时用
-`http.sslBackend=openssl` 重试一次。令牌优先取 `GITHUB_TOKEN` / `GH_TOKEN`，否则执行
-`tokenCommand`；经 `GIT_CONFIG_*` 环境变量传给 git，不落在命令行、不写进配置、不打日志。
-
-### 开发
-
-```powershell
-pnpm install
-node --test test/
-```
-
-测试覆盖清单解析与回退、三种命名空间、frontmatter 告警、同步调度与退避、令牌重试、
-mirror 锁、`/marketplace` 输出，以及（本地存在 checkout 时）对真实仓库做全量链接校验。
-
-### License
+测试使用隔离的 DSH home、真实 loopback HTTP 和临时归档；不读取真实 Store，也不更新本机 profile。跨进程 Store 测试使用独立 Node 进程。可选的真实仓库只读链接检查需显式设置 `SKILL_ADAPTER_REPO`。CI 在 Windows 和 Linux 上先冻结安装依赖再执行 `npm test`。
 
 [MIT](LICENSE)
