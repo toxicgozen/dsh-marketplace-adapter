@@ -16,7 +16,7 @@
  * @module dsh-marketplace-adapter
  */
 
-import { readFileSync } from 'node:fs';
+import { readMarketplaceStore, readMarketplaceStoreSync, updateMarketplaceStore } from './store.js';
 import { ArchiveCache, sourceIdentity } from './archive.js';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import z from '@deepseek-ai/schemastery';
@@ -125,7 +125,11 @@ export function apply(ctx, config = {}) {
   const { marketplaces: declared } = normalizeBundleConfig(rawConfig);
   const storePath = declared[0].storePath;
   const mounted = [];
-  const state = { providers: [], declared, storePath, refresh };
+  let queue = Promise.resolve();
+  const state = { providers: [], declared, storePath, refresh, normalizeStored,
+    enqueue(work) { const next = queue.then(work); queue = next.catch(() => {}); return next; },
+  };
+  function normalizeStored(entries) { return entries.length ? normalizeBundleConfig({ ...rawConfig, marketplaces: entries }).marketplaces : []; }
 
   const initial = storedEntriesSync(ctx, storePath, rawConfig);
   mount(mergeMarketplaceSources(declared, initial.entries, initial.removed));
@@ -140,21 +144,10 @@ export function apply(ctx, config = {}) {
         provider = new MarketplaceAdapterProvider(ctx, entry, control);
         return provider;
       });
-      mounted.push({ disposer, provider });
+      mounted.push({ disposer, provider, key: JSON.stringify(entry), name: entry.name });
     }
     state.providers = mounted.map((item) => item.provider);
     return state.providers;
-  }
-
-  function unmountAll() {
-    for (const item of mounted.splice(0)) {
-      try {
-        item.disposer?.();
-      } catch (error) {
-        ctx.logger.warn(`marketplace-adapter: could not unload ${item.provider?.config?.name}: ${message(error)}`);
-      }
-    }
-    state.providers = [];
   }
 
   /**
@@ -164,10 +157,21 @@ export function apply(ctx, config = {}) {
    */
   async function refresh() {
     const { marketplaces: stored, removed } = await readMarketplaceStore(storePath);
-    const storedEntries = stored.length === 0 ? [] : normalizeBundleConfig({ ...rawConfig, marketplaces: stored }).marketplaces;
-    unmountAll();
-    mount(mergeMarketplaceSources(declared, storedEntries, removed));
-    for (const provider of state.providers) provider.start();
+    const entries = mergeMarketplaceSources(declared, normalizeStored(stored), removed);
+    const keep = new Map(entries.map((entry) => [entry.name, JSON.stringify(entry)]));
+    for (let i = mounted.length - 1; i >= 0; i -= 1) {
+      const item = mounted[i];
+      if (keep.get(item.name) === item.key) continue;
+      item.provider.dispose();
+      item.disposer?.();
+      mounted.splice(i, 1);
+    }
+    for (const entry of entries) {
+      if (mounted.some((item) => item.name === entry.name)) continue;
+      mount([entry]);
+      mounted.at(-1).provider.start();
+    }
+    state.providers = entries.map((entry) => mounted.find((item) => item.name === entry.name).provider);
     return state.providers;
   }
 }
@@ -198,6 +202,7 @@ function registerMarketplaceCommand(ctx, state) {
     description: 'List, add, remove or resync the adapted marketplaces',
     input: { hint: '[sync [name] | add <owner/repo> [name] | remove <name>]' },
     async handler(invocation) {
+      return state.enqueue(async () => {
       const [action, first, second] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
 
       try {
@@ -221,6 +226,7 @@ function registerMarketplaceCommand(ctx, state) {
       } catch (error) {
         return { kind: 'error', text: `marketplace: ${message(error)}` };
       }
+      });
     },
   });
 }
@@ -235,49 +241,34 @@ async function statusText(state) {
   return blocks.join('\n\n');
 }
 
-async function addMarketplace(state, repository, name) {
-  const normalized = normalizeBundleConfig({ marketplaces: [{ repository, ...(name === undefined ? {} : { name }) }] }).marketplaces[0];
-  const { marketplaces: stored, removed } = await readMarketplaceStore(state.storePath);
-  const declared = state.declared.some((entry) => entry.name === normalized.name);
-
-  if (declared) {
-    if (!removed.includes(normalized.name)) {
-      return { kind: 'error', text: `marketplace: "${normalized.name}" already exists` };
-    }
-    await writeMarketplaceStore(state.storePath, stored, removed.filter((item) => item !== normalized.name));
-    await state.refresh();
-    return { kind: 'success', text: `restored ${normalized.name}\n\n${await statusText(state)}` };
-  }
-
-  if (state.providers.some((provider) => provider.config.name === normalized.name)) {
-    return { kind: 'error', text: `marketplace: "${normalized.name}" already exists` };
-  }
-
-  await writeMarketplaceStore(
-    state.storePath,
-    [...stored, { name: normalized.name, repository: normalized.repository, ref: normalized.ref }],
-    removed.filter((item) => item !== normalized.name),
-  );
+async function addMarketplace(state, url, name) {
+  const normalized = normalizeBundleConfig({ marketplaces: [{ url, ...(name === undefined ? {} : { name }) }] }).marketplaces[0];
+  const result = await updateMarketplaceStore(state.storePath, (store) => {
+    const declared = state.declared.some((entry) => entry.name === normalized.name);
+    const exists = state.normalizeStored(store.marketplaces).some((entry) => entry.name === normalized.name);
+    const removed = store.removed.includes(normalized.name);
+    if ((declared || exists) && !removed) return { kind: 'error', text: `marketplace: "${normalized.name}" already exists`, changed: false };
+    store.removed = store.removed.filter((entry) => entry !== normalized.name);
+    if (!declared && !exists) store.marketplaces.push({ name: normalized.name, url: normalized.url, ref: normalized.ref });
+    return { kind: 'success', text: `${removed ? 'restored' : 'added'} ${normalized.name}` };
+  });
+  if (result.kind === 'error') return result;
   await state.refresh();
-  return { kind: 'success', text: `added ${normalized.name} (${normalized.repository})\n\n${await statusText(state)}` };
+  return { kind: 'success', text: `${result.text}\n\n${await statusText(state)}` };
 }
 
 async function removeMarketplace(state, name) {
-  const { marketplaces: stored, removed } = await readMarketplaceStore(state.storePath);
-
-  if (state.declared.some((entry) => entry.name === name)) {
-    if (removed.includes(name)) return { kind: 'error', text: `marketplace: "${name}" is already removed` };
-    await writeMarketplaceStore(state.storePath, stored, [...removed, name]);
-    await state.refresh();
-    return { kind: 'success', text: `removed ${name} (declared in cordis.patch.yml; add it again to restore)\n\n${await statusText(state)}` };
-  }
-
-  const next = stored.filter((entry) => entry.name !== name && marketplaceName(String(entry.repository)) !== name);
-  if (next.length === stored.length) return { kind: 'error', text: `marketplace: no stored marketplace named "${name}"` };
-
-  await writeMarketplaceStore(state.storePath, next, removed);
+  const result = await updateMarketplaceStore(state.storePath, (store) => {
+    const declared = state.declared.some((entry) => entry.name === name);
+    const normalized = state.normalizeStored(store.marketplaces);
+    if ((!declared && !normalized.some((entry) => entry.name === name)) || store.removed.includes(name)) return { kind: 'error', text: `marketplace: no marketplace named "${name}"`, changed: false };
+    store.marketplaces = store.marketplaces.filter((_entry, index) => normalized[index].name !== name);
+    if (declared) store.removed.push(name);
+    return { kind: 'success', text: `removed ${name}` };
+  });
+  if (result.kind === 'error') return result;
   await state.refresh();
-  return { kind: 'success', text: `removed ${name}\n\n${await statusText(state)}` };
+  return { kind: 'success', text: `${result.text}\n\n${await statusText(state)}` };
 }
 
 function renderMarketplace(provider, packages, complete) {
@@ -574,55 +565,6 @@ export function defaultMirrorPath(repository) {
 export function defaultStorePath() {
   const home = optionalString(process.env.DSH_HOME) ?? join(homedir(), '.dsh');
   return join(home, 'marketplace-adapter', 'marketplaces.json');
-}
-
-function plainEntries(value) {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry) => entry !== null && typeof entry === 'object' && !Array.isArray(entry));
-}
-
-/**
- * Read the UI-managed list. A missing or unreadable file is an empty list: a
- * broken store must never take the declared marketplaces down with it.
- * @param path - the store path.
- * @returns the stored entries.
- */
-export async function readMarketplaceStore(path) {
-  let text;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (error) {
-    if (isAbsent(error)) return { marketplaces: [], removed: [] };
-    throw error;
-  }
-  return parseMarketplaceStore(text);
-}
-
-/** Activation-time read; the store is tiny and must be applied before the first catalog. */
-export function readMarketplaceStoreSync(path) {
-  try {
-    return parseMarketplaceStore(readFileSync(path, 'utf8'));
-  } catch {
-    return { marketplaces: [], removed: [] };
-  }
-}
-
-function parseMarketplaceStore(text) {
-  try {
-    const parsed = JSON.parse(text);
-    const removed = Array.isArray(parsed?.removed) ? parsed.removed.filter((name) => typeof name === 'string') : [];
-    return { marketplaces: plainEntries(parsed?.marketplaces), removed };
-  } catch {
-    return { marketplaces: [], removed: [] };
-  }
-}
-
-/** Replace the store atomically, so an interrupted write cannot truncate it. */
-export async function writeMarketplaceStore(path, marketplaces, removed = []) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.tmp`;
-  await writeFile(temp, `${JSON.stringify({ version: 1, marketplaces, removed }, null, 2)}\n`, 'utf8');
-  await rename(temp, path);
 }
 
 /**
