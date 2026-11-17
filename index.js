@@ -18,7 +18,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdir, readFile, mkdir } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -32,6 +32,34 @@ const DEFAULT_REPOSITORY = 'https://github.com/toxicgozen/skills.git';
 const DEFAULT_REF = 'main';
 const DEFAULT_RANK = 300;
 const DEFAULT_TOKEN_COMMAND = Object.freeze(['gh', 'auth', 'token']);
+/** Wall-clock cadence for the refresh check; the check itself is cheap. */
+export const SYNC_TICK_MS = 15_000;
+/** First retry delay after a failed sync; doubles per consecutive failure. */
+export const RETRY_BASE_MS = 15_000;
+/** Upper bound for the retry delay so a recovered host refreshes within minutes. */
+export const RETRY_MAX_MS = 300_000;
+/** A lock this old belongs to a dead process and may be reclaimed. */
+const LOCK_STALE_MS = 600_000;
+/**
+ * Frontmatter that other hosts act on but DSH ignores. Warning is the only
+ * honest option: silently dropping them makes the same skill behave differently
+ * per host with no visible signal.
+ */
+const HOST_SPECIFIC_FIELDS = Object.freeze([
+  'paths',
+  'globs',
+  'allowed-tools',
+  'allowed_tools',
+  'argument-hint',
+  'argumentHint',
+  'disableModelInvocation',
+  'modelInvocable',
+  'userInvocable',
+  'hooks',
+  'context',
+  'agent',
+  'model',
+]);
 const NAMESPACES = Object.freeze(['none', 'collision', 'plugin']);
 const SSL_BACKENDS = Object.freeze(['auto', 'openssl', 'schannel']);
 const TRUTHY = new Set(['true', 'yes', 'on', '1']);
@@ -188,11 +216,12 @@ export function defaultMirrorPath(repository) {
  * Nothing here commits, pushes, or writes into the checkout beyond `reset`.
  */
 export class GitMirror {
-  constructor(config, logger) {
+  constructor(config, logger, exec = execFileAsync) {
     this.config = config;
     this.logger = logger ?? console;
-    this.tokenResolved = false;
-    this.token = undefined;
+    this.exec = exec;
+    this.tokenState = { value: undefined, resolved: false };
+    this.tokenWarning = undefined;
   }
 
   /**
@@ -200,6 +229,7 @@ export class GitMirror {
    * @returns the short revision now checked out.
    */
   async sync() {
+    this.tokenAttempt = { done: false, value: undefined };
     const config = this.config;
     await mkdir(dirname(config.mirrorPath), { recursive: true });
 
@@ -240,7 +270,7 @@ export class GitMirror {
   async execGit(args, timeoutMs, forceOpenSsl) {
     const env = await this.gitEnvironment(forceOpenSsl);
     try {
-      return await execFileAsync(this.config.gitPath, args, {
+      return await this.exec(this.config.gitPath, args, {
         env,
         timeout: timeoutMs,
         windowsHide: true,
@@ -283,36 +313,55 @@ export class GitMirror {
 
   /**
    * Resolve a GitHub token without ever putting it on a command line: an
-   * environment variable first, then the configured token command.
+   * environment variable first, then the configured token command. Only a
+   * definitive answer is cached, so a token that appears after startup is picked
+   * up by the next retry instead of being lost for the life of the process.
    * @returns the token, or `undefined` to attempt an unauthenticated fetch.
    */
   async resolveToken() {
-    if (this.tokenResolved) return this.token;
-    this.tokenResolved = true;
+    if (this.tokenState.resolved) return this.tokenState.value;
+    if (this.tokenAttempt?.done === true) return this.tokenAttempt.value;
+    const value = await this.resolveTokenOnce();
+    this.tokenAttempt = { done: true, value };
+    return value;
+  }
 
+  async resolveTokenOnce() {
     for (const key of ['GITHUB_TOKEN', 'GH_TOKEN']) {
       const value = process.env[key];
       if (typeof value === 'string' && value.trim() !== '') {
-        this.token = value.trim();
-        return this.token;
+        this.tokenState = { value: value.trim(), resolved: true };
+        return this.tokenState.value;
       }
     }
 
     const command = this.config.tokenCommand;
-    if (command === null) return undefined;
+    if (command === null) {
+      this.tokenState = { value: undefined, resolved: true };
+      return undefined;
+    }
+
     try {
-      const result = await execFileAsync(command[0], command.slice(1), {
+      const result = await this.exec(command[0], command.slice(1), {
         timeout: this.config.tokenTimeoutMs,
         windowsHide: true,
         encoding: 'utf8',
       });
-      const value = result.stdout.trim();
-      if (value !== '') this.token = value;
+      const value = String(result.stdout ?? '').trim();
+      this.tokenState = { value: value === '' ? undefined : value, resolved: true };
+      return this.tokenState.value;
     } catch (error) {
-      if (isAbsentExecutable(error)) return undefined;
-      this.logger.warn(`skill-plugins: token command failed: ${message(error)}`);
+      if (isAbsentExecutable(error)) {
+        this.tokenState = { value: undefined, resolved: true };
+        return undefined;
+      }
+      const text = `skill-plugins: token command failed: ${message(error)}`;
+      if (this.tokenWarning !== text) {
+        this.tokenWarning = text;
+        this.logger.warn(text);
+      }
+      return undefined;
     }
-    return this.token;
   }
 }
 
@@ -326,29 +375,122 @@ export async function syncMirror(config, logger = console) {
   return new GitMirror(config, logger).sync();
 }
 
+/**
+ * Take exclusive ownership of one mirror working copy for one process. Two DSH
+ * windows share the same mirror; a concurrent `fetch`/`reset` pair collides on
+ * git's index lock and used to leave the second window without skills.
+ */
+export async function acquireMirrorLock(mirrorPath, options = {}) {
+  const now = options.now ?? Date.now;
+  const staleAfterMs = options.staleAfterMs ?? LOCK_STALE_MS;
+  const lockPath = `${mirrorPath}.lock`;
+  await mkdir(dirname(lockPath), { recursive: true });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let handle;
+    try {
+      handle = await open(lockPath, 'wx');
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      const owner = await readLockOwner(lockPath);
+      if (owner !== undefined && now() - owner.at < staleAfterMs) return undefined;
+      await rm(lockPath, { force: true });
+      continue;
+    }
+
+    await handle.writeFile(JSON.stringify({ pid: process.pid, at: now() }), 'utf8');
+    await handle.close();
+
+    let released = false;
+    return {
+      path: lockPath,
+      async release() {
+        if (released) return;
+        released = true;
+        await rm(lockPath, { force: true });
+      },
+    };
+  }
+
+  return undefined;
+}
+
+async function readLockOwner(path) {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'));
+    return typeof parsed?.at === 'number' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Delay before the next attempt after `failures` consecutive sync failures. */
+export function backoffDelayMs(failures) {
+  const exponent = Math.max(0, Math.min(failures - 1, 5));
+  return Math.min(RETRY_BASE_MS * 2 ** exponent, RETRY_MAX_MS);
+}
+
+/**
+ * When the next refresh attempt is due.
+ * @returns an epoch timestamp, `0` for "now", or `Infinity` when scheduling is off.
+ */
+export function syncDueAt(state, config) {
+  if (!config.syncOnApply) return Infinity;
+  if (!(state.lastAttemptAt > 0)) return 0;
+  if (state.consecutiveFailures > 0) return state.lastAttemptAt + backoffDelayMs(state.consecutiveFailures);
+  if (!(config.syncIntervalMinutes > 0)) return Infinity;
+  return state.lastAttemptAt + config.syncIntervalMinutes * 60_000;
+}
+
+/** Whether a refresh may start now. */
+export function shouldSync(state, config, now) {
+  if (state.running !== undefined) return false;
+  return now >= syncDueAt(state, config);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Provider                                                                   */
 /* -------------------------------------------------------------------------- */
 
-class SkillPluginsProvider {
-  constructor(ctx, config, control) {
+export class SkillPluginsProvider {
+  constructor(ctx, config, control, deps = {}) {
     this.ctx = ctx;
     this.config = config;
     this.control = control;
     this.name = config.providerName;
     this.disposed = false;
-    this.syncing = undefined;
-    this.lastSyncAt = 0;
-    this.mirror = new GitMirror(config, ctx.logger);
+    this.state = {
+      running: undefined,
+      lastAttemptAt: 0,
+      lastSuccessAt: 0,
+      consecutiveFailures: 0,
+      lastError: undefined,
+    };
+    this.now = deps.now ?? (() => Date.now());
+    this.timers = deps.timers ?? { setInterval, clearInterval };
+    this.timer = undefined;
+    this.mirror = deps.mirror ?? new GitMirror(config, ctx.logger, deps.exec);
     this.warned = new Set();
-    control.signal.addEventListener('abort', () => {
-      this.disposed = true;
-    }, { once: true });
+    control.signal.addEventListener('abort', () => this.dispose(), { once: true });
   }
 
-  /** Kick off the first synchronization without blocking plugin activation. */
+  /**
+   * Own the refresh schedule. The catalog is cached by the skill registry, so a
+   * provider that only refreshes from `list()` never refreshes a warm session.
+   */
   start() {
-    if (this.config.syncOnApply) this.runSync();
+    if (this.disposed || !this.config.syncOnApply) return;
+    this.timer = this.timers.setInterval(() => this.runSyncIfDue(), SYNC_TICK_MS);
+    this.timer?.unref?.();
+    this.runSyncIfDue();
+  }
+
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== undefined) {
+      this.timers.clearInterval(this.timer);
+      this.timer = undefined;
+    }
   }
 
   /**
@@ -357,7 +499,7 @@ class SkillPluginsProvider {
    * @returns candidate summaries, or an incomplete observation before the mirror exists.
    */
   async list(options = {}) {
-    this.maybeSync();
+    this.runSyncIfDue();
     return collectSkillCandidates(this.config, {
       provider: this.name,
       signal: options.signal,
@@ -394,34 +536,45 @@ class SkillPluginsProvider {
     this.ctx.logger.warn(`skill-plugins: ${key}`);
   }
 
-  maybeSync() {
-    const config = this.config;
-    if (!config.syncOnApply) return;
-    if (!(config.syncIntervalMinutes > 0)) return;
-    if (this.syncing !== undefined) return;
-    if (this.lastSyncAt === 0) return;
-    if (Date.now() - this.lastSyncAt < config.syncIntervalMinutes * 60000) return;
-    this.runSync();
+  runSyncIfDue(now = this.now()) {
+    if (this.disposed) return undefined;
+    if (!shouldSync(this.state, this.config, now)) return this.state.running;
+    return this.runSync();
   }
 
   runSync() {
-    if (this.syncing !== undefined) return this.syncing;
-    this.syncing = this.sync().finally(() => {
-      this.syncing = undefined;
+    if (this.disposed) return undefined;
+    const running = this.sync().finally(() => {
+      this.state.running = undefined;
     });
-    return this.syncing;
+    this.state.running = running;
+    return running;
   }
 
   async sync() {
     const config = this.config;
+    this.state.lastAttemptAt = this.now();
+    const lock = await acquireMirrorLock(config.mirrorPath, { now: this.now });
+    if (lock === undefined) {
+      this.warn(`another instance is already syncing ${config.mirrorPath}; keeping the current catalog`);
+      return;
+    }
+
     try {
       const revision = await this.mirror.sync();
-      this.lastSyncAt = Date.now();
+      this.state.lastSuccessAt = this.now();
+      this.state.consecutiveFailures = 0;
+      this.state.lastError = undefined;
       this.control.invalidate();
       this.ctx.logger.info(`skill-plugins: ${config.repository}@${config.ref} at ${revision}`);
     } catch (error) {
-      this.lastSyncAt = Date.now();
-      this.ctx.logger.warn(`skill-plugins: sync failed: ${message(error)}`);
+      this.state.consecutiveFailures += 1;
+      this.state.lastError = message(error);
+      const delay = Math.round(backoffDelayMs(this.state.consecutiveFailures) / 1000);
+      this.ctx.logger.warn(`skill-plugins: sync failed (${this.state.lastError}); retry in ${delay}s`);
+    } finally {
+      this.state.lastAttemptAt = this.now();
+      await lock.release();
     }
   }
 }
@@ -494,6 +647,11 @@ export async function collectSkillCandidates(config, hooks = {}) {
       if (!parsed.ok) {
         onWarning(`${plugin}/skills/${entry}/SKILL.md ignored: ${parsed.reason}`);
         continue;
+      }
+      for (const field of parsed.skill.unsupported) {
+        onWarning(
+          `${plugin}/skills/${entry}/SKILL.md uses "${field}", which DSH does not read; this skill behaves differently here`,
+        );
       }
       collected.push({ plugin, manifest, skillDir, file, ...parsed.skill });
     }
@@ -599,6 +757,7 @@ export function parseSkillDocument(text) {
   }
 
   const whenToUse = stringField(data, 'whenToUse');
+  const unsupported = HOST_SPECIFIC_FIELDS.filter((field) => Object.hasOwn(data, field));
   return {
     ok: true,
     skill: {
@@ -609,6 +768,7 @@ export function parseSkillDocument(text) {
         modelInvocable: disableModelInvocation !== true,
         userInvocable: userInvocable !== false,
       },
+      unsupported,
       body: frontmatter.body,
     },
   };

@@ -142,13 +142,23 @@ DSH 硬约束，不是本插件的选择：
 | `respectDisableModelInvocation` | `true` | `false` 时强制所有技能都可被模型调用 |
 | `plugins.include` / `plugins.exclude` | `[]` | 按 plugin 目录名收窄 |
 | `syncOnApply` | `true` | 插件加载时同步；`false` 则只读 mirror |
-| `syncIntervalMinutes` | `60` | 同步间隔，`0` 表示只在加载时同步 |
+| `syncIntervalMinutes` | `60` | 成功后的刷新间隔；`0` 关闭定时刷新与失败重试 |
 | `sslBackend` | `auto` | `auto` / `openssl` / `schannel` |
 | `gitPath` | `git` | git 可执行文件 |
 | `tokenCommand` | `['gh','auth','token']` | 私有库令牌来源；`"none"` 关闭 |
 | `cloneTimeoutMs` / `fetchTimeoutMs` | `300000` / `180000` | 超时 |
 | `providerName` | `toxicgozen` | 注册在 `ctx.skills` 上的 provider 名 |
 | `rank` | `300` | 同层重名的优先级 |
+
+### 刷新、重试与多实例
+
+- 刷新由插件自己的定时器驱动：每 15 秒检查一次是否到期。不能靠 catalog 重新读取来
+  驱动——DSH 注册表会缓存 provider 的 `list()`，热会话里它不会被再次调用。
+- 成功后按 `syncIntervalMinutes` 等下一轮；失败后按 15s → 30s → 60s … 最长 5 分钟
+  退避重试，不会一次失败就干等一个整间隔。
+- 同一个 mirror 上只有一个实例在同步：另一个窗口拿不到锁就跳过这一轮，保留现有 catalog。
+- 令牌只在拿到确定结果时缓存。`gh auth token` 这一轮失败，下一轮会重试——启动时
+  gh 还没登录，不会导致整个进程都没有技能。
 
 ---
 
@@ -194,7 +204,9 @@ DSH 硬约束，不是本插件的选择：
 - 只接 **skills**。仓库里的 `hooks/`、`rules/`、`playbooks/` 作为技能资源可被读取，
   但 DSH 没有对应的自动触发机制。
 - `agents/openai.yaml`、`.claude-plugin/`、`.cursor-plugin/` 是其它宿主的元数据，本插件忽略。
-- 单技能的 `paths:` 前置条件（Claude Code 的条件激活）DSH 无对应语义，会被忽略。
+- DSH 不读的 frontmatter 字段（`paths`、`globs`、`allowed-tools`、`argument-hint`、`hooks`
+  以及旧式的 `disableModelInvocation` 等）会逐条 warn 一次；技能仍会加载，但行为与
+  其它宿主不同。
 - 技能正文不做分片或缓存，每次加载重读文件。
 - mirror 只 `fetch` 当前 `ref`，不保留历史。
 

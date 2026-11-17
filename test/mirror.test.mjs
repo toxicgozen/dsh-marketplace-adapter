@@ -81,15 +81,16 @@ test('a failed token command is retried on the next sync instead of staying unre
     return { stdout: 'rev\n', stderr: '' };
   };
   const mirror = new GitMirror(config({ tokenCommand: ['gh', 'auth', 'token'] }), quietLogger, exec);
+  const gitCalls = () => calls.filter((call) => call.file === 'git');
 
   await withoutTokenEnv(async () => {
     await mirror.sync();
     assert.equal(tokenCalls, 1);
-    assert.equal(gitConfig(calls[0].env).has('http.extraHeader'), false);
+    assert.equal(gitConfig(gitCalls().at(-1).env).has('http.extraHeader'), false);
 
     await mirror.sync();
     assert.equal(tokenCalls, 2);
-    assert.equal(gitConfig(calls.at(-1).env).get('http.extraHeader'), basic('recovered-token'));
+    assert.equal(gitConfig(gitCalls().at(-1).env).get('http.extraHeader'), basic('recovered-token'));
 
     await mirror.sync();
     assert.equal(tokenCalls, 2, 'a resolved token is cached');
@@ -133,8 +134,9 @@ test('a schannel TLS failure retries once with the OpenSSL backend', async () =>
     delete process.env.GITHUB_TOKEN;
   }
 
-  assert.equal(gitCalls, 2);
-  assert.equal(gitConfig(calls.at(-1).env).get('http.sslBackend'), 'openssl');
+  assert.equal(gitCalls, 3, 'clone, its OpenSSL retry, then rev-parse');
+  assert.equal(gitConfig(calls[0].env).has('http.sslBackend'), false, 'the first attempt uses the system backend');
+  assert.equal(gitConfig(calls[1].env).get('http.sslBackend'), 'openssl', 'the retry forces OpenSSL');
 });
 
 test('the mirror lock keeps a second instance out and is released on demand', async () => {
