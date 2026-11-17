@@ -17,14 +17,12 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { ArchiveCache, sourceIdentity } from './archive.js';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import z from '@deepseek-ai/schemastery';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
-const execFileAsync = promisify(execFile);
 
 /** The public skill-name grammar enforced by `@deepseek-ai/dsh-skill`. */
 export const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -33,7 +31,6 @@ const DEFAULT_PROVIDER = 'toxicgozen';
 const DEFAULT_REPOSITORY = 'https://github.com/toxicgozen/skills.git';
 const DEFAULT_REF = 'HEAD';
 const DEFAULT_RANK = 300;
-const DEFAULT_TOKEN_COMMAND = Object.freeze(['gh', 'auth', 'token']);
 /** Wall-clock cadence for the refresh check; the check itself is cheap. */
 export const SYNC_TICK_MS = 15_000;
 /** First retry delay after a failed sync; doubles per consecutive failure. */
@@ -41,7 +38,6 @@ export const RETRY_BASE_MS = 15_000;
 /** Upper bound for the retry delay so a recovered host refreshes within minutes. */
 export const RETRY_MAX_MS = 300_000;
 /** A lock this old belongs to a dead process and may be reclaimed. */
-const LOCK_STALE_MS = 600_000;
 /**
  * Frontmatter that other hosts act on but DSH ignores. Warning is the only
  * honest option: silently dropping them makes the same skill behave differently
@@ -63,15 +59,16 @@ const HOST_SPECIFIC_FIELDS = Object.freeze([
   'model',
 ]);
 const NAMESPACES = Object.freeze(['none', 'collision', 'plugin']);
-const SSL_BACKENDS = Object.freeze(['auto', 'openssl', 'schannel']);
 
 const MarketplaceEntry = z.object({
   name: z.string().description('Stable id; defaults to <owner>-<repo>'),
-  repository: z.string().required().description('Git URL, or owner/repo'),
-  ref: z.string().default(DEFAULT_REF),
+  url: z.string().description('GitHub HTTPS repository or direct HTTPS tar.gz URL'),
+  repository: z.string().description('Compatibility alias for url'),
+  tokenEnv: z.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/).description('Credential environment variable name'),
+  cachePath: z.string().description('Immutable archive cache directory'),
+  ref: z.string(),
   namespace: z.union(NAMESPACES).description('Skill-name prefix policy for this source'),
   mirrorPath: z.string().description('Working copy; defaults under the DSH home'),
-  tokenCommand: z.union([z.array(z.string()), z.const('none')]).description('Command that prints the Git token'),
   rank: z.number().description('Precedence among providers serving the same skill name'),
 });
 
@@ -89,9 +86,9 @@ export const Config = z.object({
   respectDisableModelInvocation: z.boolean().default(true),
   syncOnApply: z.boolean().default(true).description('Sync when the profile loads'),
   syncIntervalMinutes: z.number().default(60).description('Refresh interval after a successful sync; 0 disables it'),
-  sslBackend: z.union(SSL_BACKENDS).default('auto'),
-  gitPath: z.string().default('git'),
-  tokenCommand: z.union([z.array(z.string()), z.const('none')]).default([...DEFAULT_TOKEN_COMMAND]),
+  url: z.string().description('GitHub HTTPS repository or direct HTTPS tar.gz URL'),
+  tokenEnv: z.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/).description('Credential environment variable name'),
+  cachePath: z.string().description('Immutable archive cache directory'),
   mirrorPath: z.string().description('Default working copy for sources without one'),
   storePath: z.string().description('Where /marketplace add writes the sources it owns'),
   providerName: z.string().description('Provider name for the single repository form'),
@@ -215,8 +212,8 @@ function registerMarketplaceCommand(ctx, state) {
         if (action === 'sync') {
           const targets = first === undefined ? state.providers : state.providers.filter((provider) => provider.config.name === first);
           if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${first}"` };
-          await Promise.all(targets.map((provider) => provider.runSync()));
-          return { kind: 'success', text: await statusText(state) };
+          const results = await Promise.all(targets.map((provider) => provider.runSync()));
+          return { kind: results.every(Boolean) ? 'success' : 'error', text: await statusText(state) };
         }
         if (action !== undefined) return { kind: 'error', text: MARKETPLACE_USAGE };
 
@@ -410,10 +407,8 @@ export function normalizeConfig(raw = {}) {
     throw new Error(`marketplace-adapter: namespace must be one of ${NAMESPACES.join(', ')} (got "${namespace}")`);
   }
 
-  const sslBackend = optionalString(raw.sslBackend) ?? 'auto';
-  if (!SSL_BACKENDS.includes(sslBackend)) {
-    throw new Error(`marketplace-adapter: sslBackend must be one of ${SSL_BACKENDS.join(', ')} (got "${sslBackend}")`);
-  }
+  sourceIdentity(repository, ref);
+  if (raw.tokenEnv !== undefined && (typeof raw.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(raw.tokenEnv))) throw new Error('tokenEnv must be a POSIX environment variable name');
 
   const providerName = optionalString(raw.providerName) ?? DEFAULT_PROVIDER;
   if (providerName === 'runtime') {
@@ -423,22 +418,19 @@ export function normalizeConfig(raw = {}) {
   return {
     repository,
     url: repository,
+    tokenEnv: optionalString(raw.tokenEnv),
     ref,
     mirrorPath,
+    cachePath: resolve(optionalString(raw.cachePath) ?? (optionalString(raw.mirrorPath) ? `${mirrorPath}.archives` : join(dirname(defaultStorePath()), 'snapshots'))),
     storePath: resolve(optionalString(raw.storePath) ?? defaultStorePath()),
     namespace,
     providerName,
-    sslBackend,
     plugins: normalizePlugins(raw.plugins),
     descriptionPrefix: optionalBoolean(raw.descriptionPrefix, false),
     respectDisableModelInvocation: optionalBoolean(raw.respectDisableModelInvocation, true),
     syncOnApply: optionalBoolean(raw.syncOnApply, true),
     syncIntervalMinutes: optionalNumber(raw.syncIntervalMinutes, 60, 0),
-    gitPath: optionalString(raw.gitPath) ?? 'git',
-    tokenCommand: normalizeTokenCommand(raw.tokenCommand),
-    cloneTimeoutMs: optionalNumber(raw.cloneTimeoutMs, 300000, 1000),
     fetchTimeoutMs: optionalNumber(raw.fetchTimeoutMs, 180000, 1000),
-    tokenTimeoutMs: optionalNumber(raw.tokenTimeoutMs, 20000, 1000),
     rank: optionalNumber(raw.rank, DEFAULT_RANK, 0),
   };
 }
@@ -479,15 +471,15 @@ export function normalizeBundleConfig(raw = {}) {
   }
 
   const shared = { ...raw };
-  for (const key of ['marketplaces', 'repository', 'name', 'mirrorPath', 'providerName']) delete shared[key];
+  for (const key of ['marketplaces', 'url', 'repository', 'name', 'mirrorPath', 'cachePath', 'providerName']) delete shared[key];
 
   const seen = new Set();
   const marketplaces = declared.map((entry, index) => {
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error(`marketplace-adapter: marketplaces[${index}] must be an object`);
     }
-    if (optionalString(entry.repository) === undefined) {
-      throw new Error(`marketplace-adapter: marketplaces[${index}] requires a repository`);
+    if (optionalString(entry.url) === undefined && optionalString(entry.repository) === undefined) {
+      throw new Error(`marketplace-adapter: marketplaces[${index}] requires a repository or url`);
     }
 
     const normalized = normalizeConfig({ ...shared, ...entry });
@@ -534,15 +526,6 @@ function stringArray(value, field) {
     throw new Error(`marketplace-adapter: ${field} must be an array of non-empty strings`);
   }
   return [...value];
-}
-
-function normalizeTokenCommand(value) {
-  if (value === undefined) return DEFAULT_TOKEN_COMMAND;
-  if (value === null || value === 'none') return null;
-  if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === 'string' && part.length > 0)) {
-    return [...value];
-  }
-  throw new Error('marketplace-adapter: tokenCommand must be a non-empty string array, or "none"');
 }
 
 function optionalString(value) {
@@ -674,215 +657,6 @@ export function mergeMarketplaceSources(declared, stored, removed = []) {
  * needs a real working tree so skill resources keep their relative layout.
  * Nothing here commits, pushes, or writes into the checkout beyond `reset`.
  */
-export class GitMirror {
-  constructor(config, logger, exec = execFileAsync) {
-    this.config = config;
-    this.logger = logger ?? console;
-    this.exec = exec;
-    this.tokenState = { value: undefined, resolved: false };
-    this.tokenWarning = undefined;
-  }
-
-  /**
-   * Align the working copy with `origin/<ref>`.
-   * @returns the short revision now checked out.
-   */
-  async sync() {
-    this.tokenAttempt = { done: false, value: undefined };
-    const config = this.config;
-    await mkdir(dirname(config.mirrorPath), { recursive: true });
-
-    if (await pathExists(join(config.mirrorPath, '.git'))) {
-      await this.git(['-C', config.mirrorPath, 'fetch', '--depth', '1', 'origin', config.ref], config.fetchTimeoutMs);
-      await this.git(['-C', config.mirrorPath, 'reset', '--hard', 'FETCH_HEAD'], config.fetchTimeoutMs);
-    } else {
-      if (await pathExists(config.mirrorPath)) {
-        const existing = await readdir(config.mirrorPath);
-        if (existing.length > 0) {
-          throw new Error(`mirror path is not a Git checkout: ${config.mirrorPath}`);
-        }
-      }
-      await this.git(
-        ['clone', '--depth', '1', '--branch', config.ref, config.repository, config.mirrorPath],
-        config.cloneTimeoutMs,
-      );
-    }
-
-    const head = await this.git(['-C', config.mirrorPath, 'rev-parse', '--short', 'HEAD'], 15000);
-    return head.stdout.trim();
-  }
-
-  async git(args, timeoutMs) {
-    try {
-      return await this.execGit(args, timeoutMs, false);
-    } catch (error) {
-      const text = message(error);
-      const tlsFailure = /schannel|SEC_E_NO_CREDENTIALS|AcquireCredentialsHandle/i.test(text);
-      if (this.config.sslBackend === 'auto' && tlsFailure) {
-        this.logger.info('marketplace-adapter: retrying Git with http.sslBackend=openssl');
-        return this.execGit(args, timeoutMs, true);
-      }
-      throw error;
-    }
-  }
-
-  async execGit(args, timeoutMs, forceOpenSsl) {
-    const env = await this.gitEnvironment(forceOpenSsl);
-    try {
-      return await this.exec(this.config.gitPath, args, {
-        env,
-        timeout: timeoutMs,
-        windowsHide: true,
-        maxBuffer: 16 * 1024 * 1024,
-        encoding: 'utf8',
-      });
-    } catch (error) {
-      const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-      throw new Error(stderr === '' ? message(error) : stderr);
-    }
-  }
-
-  async gitEnvironment(forceOpenSsl) {
-    const config = this.config;
-    const pairs = [
-      ['core.autocrlf', 'false'],
-      ['core.eol', 'lf'],
-      ['core.longpaths', 'true'],
-    ];
-    const backend = forceOpenSsl ? 'openssl' : config.sslBackend === 'auto' ? undefined : config.sslBackend;
-    if (backend !== undefined) pairs.push(['http.sslBackend', backend]);
-
-    const token = await this.resolveToken();
-    if (token !== undefined) {
-      const basic = Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
-      pairs.push(['http.extraHeader', `Authorization: Basic ${basic}`]);
-    }
-
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    for (const key of Object.keys(env)) {
-      if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key];
-    }
-    pairs.forEach(([key, value], index) => {
-      env[`GIT_CONFIG_KEY_${index}`] = key;
-      env[`GIT_CONFIG_VALUE_${index}`] = value;
-    });
-    env.GIT_CONFIG_COUNT = String(pairs.length);
-    return env;
-  }
-
-  /**
-   * Resolve a GitHub token without ever putting it on a command line: an
-   * environment variable first, then the configured token command. Only a
-   * definitive answer is cached, so a token that appears after startup is picked
-   * up by the next retry instead of being lost for the life of the process.
-   * @returns the token, or `undefined` to attempt an unauthenticated fetch.
-   */
-  async resolveToken() {
-    if (this.tokenState.resolved) return this.tokenState.value;
-    if (this.tokenAttempt?.done === true) return this.tokenAttempt.value;
-    const value = await this.resolveTokenOnce();
-    this.tokenAttempt = { done: true, value };
-    return value;
-  }
-
-  async resolveTokenOnce() {
-    for (const key of ['GITHUB_TOKEN', 'GH_TOKEN']) {
-      const value = process.env[key];
-      if (typeof value === 'string' && value.trim() !== '') {
-        this.tokenState = { value: value.trim(), resolved: true };
-        return this.tokenState.value;
-      }
-    }
-
-    const command = this.config.tokenCommand;
-    if (command === null) {
-      this.tokenState = { value: undefined, resolved: true };
-      return undefined;
-    }
-
-    try {
-      const result = await this.exec(command[0], command.slice(1), {
-        timeout: this.config.tokenTimeoutMs,
-        windowsHide: true,
-        encoding: 'utf8',
-      });
-      const value = String(result.stdout ?? '').trim();
-      this.tokenState = { value: value === '' ? undefined : value, resolved: true };
-      return this.tokenState.value;
-    } catch (error) {
-      if (isAbsentExecutable(error)) {
-        this.tokenState = { value: undefined, resolved: true };
-        return undefined;
-      }
-      const text = `marketplace-adapter: token command failed: ${message(error)}`;
-      if (this.tokenWarning !== text) {
-        this.tokenWarning = text;
-        this.logger.warn(text);
-      }
-      return undefined;
-    }
-  }
-}
-
-/**
- * One-shot mirror synchronization, shared by the provider and the `bin/` CLI.
- * @param config - a normalized configuration.
- * @param logger - sink for retry and token diagnostics.
- * @returns the short revision checked out.
- */
-export async function syncMirror(config, logger = console) {
-  return new GitMirror(config, logger).sync();
-}
-
-/**
- * Take exclusive ownership of one mirror working copy for one process. Two DSH
- * windows share the same mirror; a concurrent `fetch`/`reset` pair collides on
- * git's index lock and used to leave the second window without skills.
- */
-export async function acquireMirrorLock(mirrorPath, options = {}) {
-  const now = options.now ?? Date.now;
-  const staleAfterMs = options.staleAfterMs ?? LOCK_STALE_MS;
-  const lockPath = `${mirrorPath}.lock`;
-  await mkdir(dirname(lockPath), { recursive: true });
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let handle;
-    try {
-      handle = await open(lockPath, 'wx');
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-      const owner = await readLockOwner(lockPath);
-      if (owner !== undefined && now() - owner.at < staleAfterMs) return undefined;
-      await rm(lockPath, { force: true });
-      continue;
-    }
-
-    await handle.writeFile(JSON.stringify({ pid: process.pid, at: now() }), 'utf8');
-    await handle.close();
-
-    let released = false;
-    return {
-      path: lockPath,
-      async release() {
-        if (released) return;
-        released = true;
-        await rm(lockPath, { force: true });
-      },
-    };
-  }
-
-  return undefined;
-}
-
-async function readLockOwner(path) {
-  try {
-    const parsed = JSON.parse(await readFile(path, 'utf8'));
-    return typeof parsed?.at === 'number' ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Delay before the next attempt after `failures` consecutive sync failures. */
 export function backoffDelayMs(failures) {
   const exponent = Math.max(0, Math.min(failures - 1, 5));
@@ -896,6 +670,7 @@ export function backoffDelayMs(failures) {
 export function syncDueAt(state, config) {
   if (!config.syncOnApply) return Infinity;
   if (!(state.lastAttemptAt > 0)) return 0;
+  if (!(config.syncIntervalMinutes > 0)) return Infinity;
   if (state.consecutiveFailures > 0) return state.lastAttemptAt + backoffDelayMs(state.consecutiveFailures);
   if (!(config.syncIntervalMinutes > 0)) return Infinity;
   return state.lastAttemptAt + config.syncIntervalMinutes * 60_000;
@@ -929,7 +704,17 @@ export class MarketplaceAdapterProvider {
     this.now = deps.now ?? (() => Date.now());
     this.timers = deps.timers ?? { setInterval, clearInterval };
     this.timer = undefined;
-    this.mirror = deps.mirror ?? new GitMirror(config, ctx.logger, deps.exec);
+    this.archive = deps.archive ?? new ArchiveCache(config, {
+      fetch: deps.fetch,
+      resolveToken: async (name) => {
+        const service = ctx.get?.('credentials');
+        return service === undefined ? process.env[name] : (await service.resolve(name))?.value;
+      },
+    });
+    try {
+      const snapshot = this.archive.currentSync?.();
+      if (snapshot) { this.config = { ...config, mirrorPath: snapshot.root }; this.state.revision = snapshot.revision; }
+    } catch (error) { this.state.lastError = message(error); ctx.logger.warn(`marketplace-adapter: ${message(error)}`); }
     this.warned = new Set();
     control.signal.addEventListener('abort', () => this.dispose(), { once: true });
   }
@@ -940,7 +725,7 @@ export class MarketplaceAdapterProvider {
    */
   start() {
     if (this.disposed || !this.config.syncOnApply) return;
-    this.timer = this.timers.setInterval(() => this.runSyncIfDue(), SYNC_TICK_MS);
+    if (this.config.syncIntervalMinutes > 0) this.timer = this.timers.setInterval(() => this.runSyncIfDue(), SYNC_TICK_MS);
     this.timer?.unref?.();
     this.runSyncIfDue();
   }
@@ -983,7 +768,7 @@ export class MarketplaceAdapterProvider {
       if (isAbsent(error)) return undefined;
       throw error;
     }
-    const parsed = parseSkillDocument(text);
+    const parsed = parseSkillDocument(text, candidate.locator?.baseName);
     if (!parsed.ok) return undefined;
     return { ...candidate, content: parsed.skill.body };
   }
@@ -1004,6 +789,7 @@ export class MarketplaceAdapterProvider {
 
   runSync() {
     if (this.disposed) return undefined;
+    if (this.state.running !== undefined) return this.state.running;
     const running = this.sync().finally(() => {
       this.state.running = undefined;
     });
@@ -1012,30 +798,26 @@ export class MarketplaceAdapterProvider {
   }
 
   async sync() {
-    const config = this.config;
     this.state.lastAttemptAt = this.now();
-    const lock = await acquireMirrorLock(config.mirrorPath, { now: this.now });
-    if (lock === undefined) {
-      this.warn(`another instance is already syncing ${config.mirrorPath}; keeping the current catalog`);
-      return;
-    }
-
     try {
-      const revision = await this.mirror.sync();
+      const snapshot = await this.archive.sync();
+      if (this.disposed) return false;
+      this.config = { ...this.config, mirrorPath: snapshot.root };
       this.state.lastSuccessAt = this.now();
       this.state.consecutiveFailures = 0;
       this.state.lastError = undefined;
-      this.state.revision = revision;
+      this.state.revision = snapshot.revision;
       this.control.invalidate();
-      this.ctx.logger.info(`marketplace-adapter: ${config.repository}@${config.ref} at ${revision}`);
+      this.ctx.logger.info(`marketplace-adapter: ${this.config.name ?? this.name} snapshot ${snapshot.revision}`);
+      return true;
     } catch (error) {
       this.state.consecutiveFailures += 1;
       this.state.lastError = message(error);
-      const delay = Math.round(backoffDelayMs(this.state.consecutiveFailures) / 1000);
-      this.ctx.logger.warn(`marketplace-adapter: sync failed (${this.state.lastError}); retry in ${delay}s`);
+      const retry = this.config.syncIntervalMinutes > 0 ? `; retry in ${Math.round(backoffDelayMs(this.state.consecutiveFailures) / 1000)}s` : '';
+      this.ctx.logger.warn(`marketplace-adapter: sync failed (${this.state.lastError})${retry}`);
+      return false;
     } finally {
       this.state.lastAttemptAt = this.now();
-      await lock.release();
     }
   }
 }

@@ -13,7 +13,7 @@ import {
 } from '../index.js';
 
 function config(overrides = {}) {
-  return normalizeConfig({ repository: 'https://example.com/skills.git', mirrorPath: join(process.cwd(), 'test', '.tmp', 'mirror'), ...overrides });
+  return normalizeConfig({ url: 'https://example.com/skills.tar.gz', mirrorPath: join(process.cwd(), 'test', '.tmp', 'mirror'), ...overrides });
 }
 
 function fakeContext() {
@@ -62,7 +62,7 @@ function providerWith(mirror, overrides = {}) {
   const timers = fakeTimers();
   const now = { value: 1_000_000 };
   const provider = new MarketplaceAdapterProvider(ctx, config(overrides), control, {
-    mirror,
+    archive: { sync: async () => ({ revision: await mirror.sync(), root: config(overrides).mirrorPath }) },
     timers,
     now: () => now.value,
   });
@@ -166,6 +166,32 @@ test('a disposed provider stops scheduling and ignores further ticks', async () 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(calls, 1);
+});
+
+test('zero interval never retries a failed startup and manual sync is single-flight', async () => {
+  let finish;
+  let calls = 0;
+  const { provider, now, timers } = providerWith({ sync: () => { calls += 1; return new Promise((resolve) => { finish = resolve; }); } }, { syncIntervalMinutes: 0 });
+  provider.start();
+  const running = provider.runSync();
+  assert.equal(running, provider.state.running);
+  finish('revision');
+  await running;
+  provider.state.consecutiveFailures = 1;
+  provider.runSyncIfDue(now.value + RETRY_MAX_MS * 2);
+  assert.equal(calls, 1);
+  assert.equal(timers.registered.length, 0);
+  provider.dispose();
+});
+
+test('dispose during synchronization prevents invalidation', async () => {
+  let finish;
+  const { provider, control } = providerWith({ sync: () => new Promise((resolve) => { finish = resolve; }) });
+  const running = provider.runSync();
+  provider.dispose();
+  finish('late');
+  await running;
+  assert.equal(control.invalidated, 0);
 });
 
 test('cleanup', async () => {
