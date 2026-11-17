@@ -85,43 +85,52 @@ export const inject = ['skills'];
  * @param config - the row's `config` object; see {@link normalizeConfig}.
  */
 export function apply(ctx, config = {}) {
-  const normalized = normalizeConfig(config);
-  let provider;
-
-  ctx.skills.registerProvider((control) => {
-    provider = new MarketplaceAdapterProvider(ctx, normalized, control);
+  const { marketplaces } = normalizeBundleConfig(config);
+  const providers = marketplaces.map((entry) => {
+    let provider;
+    ctx.skills.registerProvider((control) => {
+      provider = new MarketplaceAdapterProvider(ctx, entry, control);
+      return provider;
+    });
     return provider;
   });
 
-  registerMarketplaceCommand(ctx, provider);
-  provider.start();
+  registerMarketplaceCommand(ctx, providers);
+  for (const provider of providers) provider.start();
 }
 
 /**
- * `/marketplace` is the human-facing read of the same state the provider keeps:
- * what repository is adapted, which revision it is on, when it last refreshed,
+ * `/marketplace` is the human-facing read of the same state each provider keeps:
+ * which repository is adapted, which revision it is on, when it last refreshed,
  * and which packages and versions it serves. The settings UI calls the same
  * command once it exists.
  */
-function registerMarketplaceCommand(ctx, provider) {
+function registerMarketplaceCommand(ctx, providers) {
   const commands = ctx.get('commands');
   if (commands === undefined) return;
 
   commands.register({
     name: 'marketplace',
-    description: 'Show the adapted marketplace: packages, versions and the last refresh',
-    input: { hint: '[sync]' },
+    description: 'List the adapted marketplaces with their packages, versions and last refresh',
+    input: { hint: '[sync [name]]' },
     async handler(invocation) {
-      const action = invocation.rawInput.trim().toLowerCase();
+      const [action, name] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
+
       if (action === 'sync') {
-        await provider.runSync();
-      } else if (action !== '') {
-        return { kind: 'error', text: 'usage: /marketplace [sync]' };
+        const targets = name === undefined ? providers : providers.filter((provider) => provider.config.name === name);
+        if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${name}"` };
+        await Promise.all(targets.map((provider) => provider.runSync()));
+      } else if (action !== undefined) {
+        return { kind: 'error', text: 'usage: /marketplace [sync [name]]' };
       }
 
       try {
-        const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
-        return { kind: 'success', text: renderMarketplace(provider, packages, complete) };
+        const blocks = [];
+        for (const provider of providers) {
+          const { packages, complete } = await describeMarketplace(provider.config, (text) => provider.warn(text));
+          blocks.push(renderMarketplace(provider, packages, complete));
+        }
+        return { kind: 'success', text: blocks.join('\n\n') };
       } catch (error) {
         return { kind: 'error', text: `marketplace: ${message(error)}` };
       }
@@ -133,7 +142,7 @@ function renderMarketplace(provider, packages, complete) {
   const config = provider.config;
   const state = provider.state;
   const lines = [
-    `marketplace  ${config.repository}@${config.ref}`,
+    `marketplace  ${config.name}  ${config.repository}@${config.ref}`,
     `revision     ${state.revision ?? 'not synced yet'}`,
     `last sync    ${state.lastSuccessAt === 0 ? 'never' : new Date(state.lastSuccessAt).toLocaleString()}`,
     `packages     ${packages.length}${complete ? '' : ' (mirror missing)'}`,
@@ -214,6 +223,70 @@ export function normalizeConfig(raw = {}) {
 export function normalizeRepository(value) {
   const text = String(value).trim();
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}.git` : text;
+}
+
+/**
+ * Resolve the bundle-level configuration into one entry per marketplace.
+ *
+ * `marketplaces` declares several sources side by side; a flat `repository` is
+ * still accepted and becomes the single entry. Shared fields act as defaults for
+ * every entry, while `mirrorPath` and `providerName` stay per-entry so two
+ * marketplaces never share a working copy or a registry name.
+ * @param raw - the loader-supplied configuration object.
+ * @returns `{ marketplaces }`, each a normalized entry carrying `name` and `providerName`.
+ */
+export function normalizeBundleConfig(raw = {}) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new TypeError('marketplace-adapter: config must be an object');
+  }
+
+  const declared = raw.marketplaces;
+  if (declared === undefined) {
+    const single = normalizeConfig(raw);
+    const name = marketplaceName(single.repository);
+    return { marketplaces: [{ ...single, name, providerName: optionalString(raw.providerName) ?? name }] };
+  }
+  if (!Array.isArray(declared) || declared.length === 0) {
+    throw new Error('marketplace-adapter: marketplaces must be a non-empty array');
+  }
+
+  const shared = { ...raw };
+  for (const key of ['marketplaces', 'repository', 'name', 'mirrorPath', 'providerName']) delete shared[key];
+
+  const seen = new Set();
+  const marketplaces = declared.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`marketplace-adapter: marketplaces[${index}] must be an object`);
+    }
+    if (optionalString(entry.repository) === undefined) {
+      throw new Error(`marketplace-adapter: marketplaces[${index}] requires a repository`);
+    }
+
+    const normalized = normalizeConfig({ ...shared, ...entry });
+    const name = optionalString(entry.name) ?? marketplaceName(normalized.repository);
+    const providerName = optionalString(entry.providerName) ?? name;
+    if (providerName === 'runtime') {
+      throw new Error('marketplace-adapter: providerName "runtime" is reserved by the skill registry');
+    }
+    if (seen.has(name)) throw new Error(`marketplace-adapter: duplicate marketplace name "${name}"`);
+    seen.add(name);
+
+    return { ...normalized, name, providerName };
+  });
+
+  return { marketplaces };
+}
+
+/** `<owner>-<repo>` from a Git URL; the stable id shown in `/marketplace`. */
+function marketplaceName(repository) {
+  const tail = String(repository)
+    .replace(/[\\/]+$/, '')
+    .replace(/\.git$/, '')
+    .split(/[\\/:]+/)
+    .filter((part) => part.length > 0)
+    .slice(-2)
+    .join('-');
+  return slug(tail) || 'marketplace';
 }
 
 function normalizePlugins(value) {

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { collectSkillCandidates, normalizeConfig, normalizeRepository } from '../index.js';
+import { collectSkillCandidates, normalizeBundleConfig, normalizeConfig, normalizeRepository } from '../index.js';
 
 function config(mirrorPath) {
   return normalizeConfig({ repository: 'toxicgozen/skills', mirrorPath });
@@ -105,4 +105,39 @@ test('the package filter applies to manifest package names', async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('a flat repository becomes one named marketplace and shared fields reach each entry', () => {
+  const single = normalizeBundleConfig({ repository: 'toxicgozen/skills' }).marketplaces;
+  assert.equal(single.length, 1);
+  assert.equal(single[0].name, 'toxicgozen-skills');
+  assert.equal(single[0].providerName, 'toxicgozen-skills');
+  assert.equal(single[0].repository, 'https://github.com/toxicgozen/skills.git');
+
+  const many = normalizeBundleConfig({
+    namespace: 'none',
+    marketplaces: [
+      { repository: 'toxicgozen/skills' },
+      { name: 'work', repository: 'https://git.example.com/team/skills.git', ref: 'release' },
+    ],
+  }).marketplaces;
+
+  assert.deepEqual(many.map((entry) => entry.name), ['toxicgozen-skills', 'work']);
+  assert.equal(many[0].namespace, 'none', 'shared defaults reach each entry');
+  assert.equal(many[1].ref, 'release');
+  assert.equal(many[1].providerName, 'work');
+  assert.notEqual(many[0].mirrorPath, many[1].mirrorPath, 'each marketplace owns its working copy');
+});
+
+test('invalid marketplace declarations are rejected before anything starts', () => {
+  assert.throws(
+    () => normalizeBundleConfig({ marketplaces: [{ name: 'a', repository: 'x/one' }, { name: 'a', repository: 'x/two' }] }),
+    /duplicate marketplace name/,
+  );
+  assert.throws(() => normalizeBundleConfig({ marketplaces: [{ name: 'a' }] }), /requires a repository/);
+  assert.throws(() => normalizeBundleConfig({ marketplaces: [] }), /non-empty array/);
+  assert.throws(
+    () => normalizeBundleConfig({ marketplaces: [{ repository: 'x/one', providerName: 'runtime' }] }),
+    /reserved/,
+  );
 });

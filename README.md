@@ -32,6 +32,21 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
 `owner/repo` 会自动补成 `https://github.com/owner/repo.git`；私有仓要求本机
 `gh auth status` 是登录状态，令牌只在本机解析，不落盘、不进日志。
 
+多个仓库并列：
+
+```yaml
+- id: marketplace-adapter
+  config:
+    marketplaces:
+      - name: gozen
+        repository: toxicgozen/skills
+      - name: work
+        repository: https://github.com/example/skills.git
+        ref: main
+```
+
+每个 marketplace 有自己的 mirror、provider 和同步状态，`/marketplace` 分行列出。
+
 ### 3. 用
 
 在输入框输入 `/marketplace`：
@@ -55,8 +70,8 @@ packages     7
 
 | 位置 | 内容 |
 |---|---|
-| `/marketplace` | 仓库、revision、最后同步时间、各包版本与技能数 |
-| `/marketplace sync` | 立刻同步一次 |
+| `/marketplace` | 每个仓库的 revision、最后同步时间、各包版本与技能数 |
+| `/marketplace sync [name]` | 全部同步，或只同步指定 marketplace |
 | 技能目录 | `gozen-stack-*`、`art-stack-*` …前缀就是 marketplace 里的包名 |
 | 日志 | 同步失败会写原因，并按 15s → 30s → … → 5min 退避重试 |
 
@@ -67,7 +82,7 @@ packages     7
 - DSH 读不懂的 frontmatter（`paths:`、`globs`、`allowed-tools`、`hooks`…）会被忽略并 warn，
   同一个技能在这里的行为可能和别的宿主不同。
 - hooks、斜杠命令、条件激活：DSH 没有对应语义，本插件不模拟。
-- 一个 profile 只接一个 marketplace。
+- 多个 marketplace 里同名技能不会合并：注册表按 `rank` 再按注册顺序取第一个，其余告警丢弃。
 
 ---
 
@@ -129,7 +144,9 @@ repo ──git fetch──► mirror ──provider──► ctx.skills ──�
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `repository` | `https://github.com/toxicgozen/skills.git` | 源仓库；也接受 `owner/repo` |
+| `marketplaces` | — | 并列的源列表，每项见下；给了它就不再读顶层 `repository` |
+| `repository` | `https://github.com/toxicgozen/skills.git` | 只有一个源时的简写；也接受 `owner/repo` |
+| `name` | `<owner>-<repo>` | marketplace 的稳定 id，出现在 `/marketplace`、日志与 provider 名里 |
 | `ref` | `main` | 跟踪的分支或 tag |
 | `mirrorPath` | `$DSH_HOME/skill-mirrors/<owner>-<repo>` | 本地镜像目录 |
 | `namespace` | `plugin` | `plugin` / `collision` / `none` |
@@ -141,8 +158,11 @@ repo ──git fetch──► mirror ──provider──► ctx.skills ──�
 | `sslBackend` | `auto` | `auto` / `openssl` / `schannel` |
 | `gitPath` | `git` | git 可执行文件 |
 | `tokenCommand` | `['gh','auth','token']` | 令牌来源；`"none"` 关闭 |
-| `providerName` | `toxicgozen` | 注册在 `ctx.skills` 上的 provider 名 |
+| `providerName` | marketplace 的 `name` | 注册在 `ctx.skills` 上的 provider 名，必须唯一 |
 | `rank` | `300` | 同层重名的优先级 |
+
+`marketplaces` 的每一项接受上表除 `marketplaces` 外的字段；顶层字段作为每一项的默认值，
+但 `mirrorPath`、`providerName`、`name` 始终按项取，避免两个源共用同一份工作副本。
 
 ### 刷新、重试与多实例
 
