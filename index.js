@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import z from '@deepseek-ai/schemastery';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -62,6 +63,44 @@ const HOST_SPECIFIC_FIELDS = Object.freeze([
   'model',
 ]);
 const NAMESPACES = Object.freeze(['none', 'collision', 'plugin']);
+const SSL_BACKENDS = Object.freeze(['auto', 'openssl', 'schannel']);
+
+const MarketplaceEntry = z.object({
+  name: z.string().description('Stable id; defaults to <owner>-<repo>'),
+  repository: z.string().required().description('Git URL, or owner/repo'),
+  ref: z.string().default(DEFAULT_REF),
+  namespace: z.union(NAMESPACES).description('Skill-name prefix policy for this source'),
+  mirrorPath: z.string().description('Working copy; defaults under the DSH home'),
+  tokenCommand: z.union([z.array(z.string()), z.const('none')]).description('Command that prints the Git token'),
+  rank: z.number().description('Precedence among providers serving the same skill name'),
+});
+
+/**
+ * The row's schema. Declaring it is what gives this bundle a settings form: the
+ * Settings page renders these fields and writes them through the settings
+ * service, so adding a marketplace never means hand-editing the profile patch.
+ */
+export const Config = z.object({
+  marketplaces: z.array(MarketplaceEntry).default([]).description('Sources to adapt side by side'),
+  repository: z.string().default(DEFAULT_REPOSITORY).description('One source, when marketplaces is empty'),
+  ref: z.string().default(DEFAULT_REF).description('Branch or tag to follow'),
+  namespace: z.union(NAMESPACES).default('plugin').description('Skill-name prefix policy'),
+  descriptionPrefix: z.boolean().default(false).description('Prefix each description with the package name'),
+  respectDisableModelInvocation: z.boolean().default(true),
+  syncOnApply: z.boolean().default(true).description('Sync when the profile loads'),
+  syncIntervalMinutes: z.number().default(60).description('Refresh interval after a successful sync; 0 disables it'),
+  sslBackend: z.union(SSL_BACKENDS).default('auto'),
+  gitPath: z.string().default('git'),
+  tokenCommand: z.union([z.array(z.string()), z.const('none')]).default([...DEFAULT_TOKEN_COMMAND]),
+  mirrorPath: z.string().description('Default working copy for sources without one'),
+  storePath: z.string().description('Where /marketplace add writes the sources it owns'),
+  providerName: z.string().description('Provider name for the single repository form'),
+  rank: z.number().default(DEFAULT_RANK),
+  plugins: z.object({
+    include: z.array(z.string()).default([]),
+    exclude: z.array(z.string()).default([]),
+  }).description('Keep or drop packages by name'),
+}).description('Adapts packaged skill marketplaces into DeepSeek Harness skills');
 
 /**
  * Marketplace manifests a packaged skill repository may ship. They declare the
@@ -73,7 +112,6 @@ const MARKETPLACE_MANIFESTS = Object.freeze([
   '.cursor-plugin/marketplace.json',
   '.agents/plugins/marketplace.json',
 ]);
-const SSL_BACKENDS = Object.freeze(['auto', 'openssl', 'schannel']);
 const TRUTHY = new Set(['true', 'yes', 'on', '1']);
 const FALSY = new Set(['false', 'no', 'off', '0']);
 
@@ -347,7 +385,7 @@ export function normalizeBundleConfig(raw = {}) {
   }
 
   const declared = raw.marketplaces;
-  if (declared === undefined) {
+  if (declared === undefined || (Array.isArray(declared) && declared.length === 0)) {
     const single = normalizeConfig(raw);
     const name = marketplaceName(single.repository);
     return { marketplaces: [{ ...single, name, providerName: optionalString(raw.providerName) ?? name }] };

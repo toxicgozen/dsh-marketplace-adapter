@@ -43,6 +43,9 @@ git clone https://github.com/toxicgozen/dsh-marketplace-adapter.git
         ref: main
 ```
 
+本包声明了配置 schema，所以 **Settings → Plugins** 里会出现同样的字段表单，改完由 DSH 写回配置，
+不用手改 YAML。
+
 配置里声明的条目也能用 `/marketplace remove` 停用：它写一条墓碑到 store，不改你的
 `cordis.patch.yml`；再用 `/marketplace add` 加同一个仓库就会恢复。命令添加的条目直接存在 store 里。
 
@@ -184,6 +187,7 @@ repo ──git fetch──► mirror ──provider──► ctx.skills ──�
 ### 开发
 
 ```powershell
+pnpm install
 node --test test/
 ```
 

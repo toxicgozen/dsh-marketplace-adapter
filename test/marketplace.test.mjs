@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { collectSkillCandidates, normalizeBundleConfig, normalizeConfig, normalizeRepository } from '../index.js';
+import { Config, collectSkillCandidates, normalizeBundleConfig, normalizeConfig, normalizeRepository } from '../index.js';
 
 function config(mirrorPath) {
   return normalizeConfig({ repository: 'toxicgozen/skills', mirrorPath });
@@ -135,9 +135,23 @@ test('invalid marketplace declarations are rejected before anything starts', () 
     /duplicate marketplace name/,
   );
   assert.throws(() => normalizeBundleConfig({ marketplaces: [{ name: 'a' }] }), /requires a repository/);
-  assert.throws(() => normalizeBundleConfig({ marketplaces: [] }), /non-empty array/);
+  assert.throws(() => normalizeBundleConfig({ marketplaces: 'nope' }), /non-empty array/);
   assert.throws(
     () => normalizeBundleConfig({ marketplaces: [{ repository: 'x/one', providerName: 'runtime' }] }),
     /reserved/,
   );
+
+  const fallback = normalizeBundleConfig({ marketplaces: [] }).marketplaces;
+  assert.equal(fallback.length, 1, 'an empty list falls back to the single repository form');
+  assert.equal(fallback[0].name, 'toxicgozen-skills');
+});
+
+test('the row schema defaults every field the settings form renders', () => {
+  const value = Config({ marketplaces: [{ repository: 'owner/repo' }] });
+  assert.equal(value.marketplaces[0].ref, 'main');
+  assert.equal(value.namespace, 'plugin');
+  assert.deepEqual(value.marketplaces[0].namespace, undefined);
+  assert.equal(value.syncIntervalMinutes, 60);
+  assert.equal(value.repository, 'https://github.com/toxicgozen/skills.git');
+  assert.throws(() => Config({ namespace: 'bogus' }));
 });
