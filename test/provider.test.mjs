@@ -1,3 +1,4 @@
+import './setup.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
@@ -168,7 +169,19 @@ test('a disposed provider stops scheduling and ignores further ticks', async () 
   assert.equal(calls, 1);
 });
 
-test('zero interval never retries a failed startup and manual sync is single-flight', async () => {
+test('zero interval makes a failed startup a single automatic attempt', async () => {
+  let calls = 0;
+  const { provider, now, timers } = providerWith({ sync: async () => { calls += 1; throw new Error('offline'); } }, { syncIntervalMinutes: 0 });
+  provider.start();
+  await provider.state.running;
+  provider.runSyncIfDue(now.value + RETRY_MAX_MS * 2);
+  assert.equal(calls, 1);
+  assert.equal(provider.state.consecutiveFailures, 1);
+  assert.equal(timers.registered.length, 0);
+  provider.dispose();
+});
+
+test('zero interval stops periodic work and manual sync is single-flight', async () => {
   let finish;
   let calls = 0;
   const { provider, now, timers } = providerWith({ sync: () => { calls += 1; return new Promise((resolve) => { finish = resolve; }); } }, { syncIntervalMinutes: 0 });

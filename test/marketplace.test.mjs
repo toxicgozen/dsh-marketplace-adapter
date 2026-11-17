@@ -1,3 +1,4 @@
+import './setup.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -51,10 +52,10 @@ test('root packages select their own skill directories and discovery alone may f
 });
 
 test('the owner/repo shorthand becomes a GitHub URL and other values stay untouched', () => {
-  assert.equal(normalizeRepository('toxicgozen/skills'), 'https://github.com/toxicgozen/skills.git');
+  assert.equal(normalizeRepository('toxicgozen/skills'), 'https://github.com/toxicgozen/skills');
   assert.equal(normalizeRepository('https://gitlab.example.com/team/skills.git'), 'https://gitlab.example.com/team/skills.git');
   assert.equal(normalizeRepository('git@github.com:toxicgozen/skills.git'), 'git@github.com:toxicgozen/skills.git');
-  assert.equal(normalizeConfig({ repository: 'toxicgozen/skills' }).repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(normalizeConfig({ repository: 'toxicgozen/skills' }).repository, 'https://github.com/toxicgozen/skills');
 });
 
 test('a marketplace manifest decides the package list and its directories', async () => {
@@ -139,13 +140,13 @@ test('a flat repository becomes one named marketplace and shared fields reach ea
   assert.equal(single.length, 1);
   assert.equal(single[0].name, 'toxicgozen-skills');
   assert.equal(single[0].providerName, 'toxicgozen-skills');
-  assert.equal(single[0].repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(single[0].repository, 'https://github.com/toxicgozen/skills');
 
   const many = normalizeBundleConfig({
     namespace: 'none',
     marketplaces: [
       { repository: 'toxicgozen/skills' },
-      { name: 'work', repository: 'https://git.example.com/team/skills.git', ref: 'release' },
+      { name: 'work', repository: 'https://git.example.com/team/skills.tar.gz', ref: 'release' },
     ],
   }).marketplaces;
 
@@ -175,10 +176,10 @@ test('invalid marketplace declarations are rejected before anything starts', () 
 
 test('the row schema defaults every field the settings form renders', () => {
   const value = Config({ marketplaces: [{ repository: 'owner/repo' }] });
-  assert.equal(value.marketplaces[0].ref, 'main');
+  assert.equal(value.marketplaces[0].ref, undefined);
   assert.equal(value.namespace, 'plugin');
   assert.deepEqual(value.marketplaces[0].namespace, undefined);
   assert.equal(value.syncIntervalMinutes, 60);
-  assert.equal(value.repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(value.repository, 'https://github.com/toxicgozen/skills');
   assert.throws(() => Config({ namespace: 'bogus' }));
 });

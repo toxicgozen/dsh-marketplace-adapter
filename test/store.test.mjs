@@ -1,3 +1,4 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
@@ -22,7 +23,7 @@ test('independent processes serialize the whole read-modify-write transaction', 
   assert.equal(new Set(saved.marketplaces.map((x) => x.name)).size, 24);
 });
 
-function command(storePath) {
+function command(storePath, options = {}) {
   let definition;
   const providers = [];
   const ctx = {
@@ -34,9 +35,23 @@ function command(storePath) {
       return () => controller.abort();
     } },
   };
-  apply(ctx, { url: 'example/base', storePath, cachePath: join(storePath, '..', 'cache'), mirrorPath: join(storePath, '..', 'legacy'), syncOnApply: false });
+  apply(ctx, { url: 'example/base', storePath, cachePath: join(storePath, '..', 'cache'), mirrorPath: join(storePath, '..', 'legacy'), syncOnApply: false, ...options });
   return { call: (rawInput) => definition.handler({ rawInput }), providers };
 }
+
+test('added sources inherit shared ref and cache root without freezing those defaults in the store', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'store-defaults-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storePath = join(dir, 'store.json');
+  const cachePath = join(dir, 'shared-cache');
+  const { call, providers } = command(storePath, { ref: 'release', cachePath });
+  assert.equal((await call('add example/new new')).kind, 'success');
+  assert.equal(providers.at(-1).config.ref, 'release');
+  assert.equal(providers.at(-1).config.cachePath, cachePath);
+  assert.equal(JSON.parse(await readFile(storePath, 'utf8')).marketplaces[0].ref, undefined);
+  providers.at(-1).archive = { sync: async () => { throw new Error('fixture offline'); } };
+  assert.equal((await call('sync new')).kind, 'error');
+});
 
 test('concurrent commands preserve every source and unchanged provider state', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'store-test-'));

@@ -1,3 +1,4 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -41,7 +42,7 @@ test('unescapes single quotes and double quotes', () => {
 
 test('supports folded block scalars', () => {
   const parsed = parseFrontmatter('---\nname: alpha\ndescription: >\n  first line\n  second line\n---\nBody.\n');
-  assert.equal(parsed.data.description, 'first line second line');
+  assert.equal(parsed.data.description, 'first line second line\n');
 });
 
 test('returns undefined without frontmatter', () => {

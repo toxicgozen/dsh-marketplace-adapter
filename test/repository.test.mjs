@@ -1,3 +1,4 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { access, readFile, stat } from 'node:fs/promises';
@@ -5,10 +6,11 @@ import { dirname, join, resolve } from 'node:path';
 
 import { collectSkillCandidates, normalizeConfig, SKILL_NAME } from '../index.js';
 
-const CHECKOUT = process.env.SKILL_ADAPTER_REPO ?? 'C:\\Users\\10202\\Projects\\skills';
-const MIRROR = join(CHECKOUT, 'plugins');
+const CHECKOUT = process.env.SKILL_ADAPTER_REPO;
+const MIRROR = CHECKOUT && join(CHECKOUT, 'plugins');
 
 async function available() {
+  if (!CHECKOUT) return false;
   try {
     await access(join(MIRROR, 'gozen-stack', 'skills'));
     return true;

@@ -1,3 +1,4 @@
+import './setup.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -69,7 +70,7 @@ test('apply registers a marketplace command that reports repository, version and
     });
 
     assert.equal(result.kind, 'success');
-    assert.match(result.text, /github\.com\/toxicgozen\/skills\.git@main/);
+    assert.match(result.text, /github\.com\/toxicgozen\/skills@HEAD/);
     assert.match(result.text, /0\.15\.41/);
     assert.match(result.text, /2 skills/);
   } finally {
@@ -132,10 +133,10 @@ test('add and remove write the store the UI owns, and the list survives a restar
     assert.match(added.text, /added work/);
     assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')), {
       version: 1,
-      marketplaces: [{ name: 'work', repository: 'https://github.com/example/two.git', ref: 'main' }],
+      marketplaces: [{ name: 'work', url: 'https://github.com/example/two' }],
       removed: [],
     });
-    assert.deepEqual(providers.slice(-2).map((provider) => provider.name), ['toxicgozen-skills', 'work']);
+    assert.equal(providers.filter((provider) => provider.name === 'work').length, 1);
 
     const dropped = await call('remove toxicgozen-skills');
     assert.equal(dropped.kind, 'success');
@@ -145,7 +146,8 @@ test('add and remove write the store the UI owns, and the list survives a restar
     const restored = await call('add toxicgozen/skills');
     assert.equal(restored.kind, 'success');
     assert.match(restored.text, /restored toxicgozen-skills/);
-    assert.deepEqual(providers.slice(-2).map((provider) => provider.name), ['toxicgozen-skills', 'work']);
+    assert.equal(providers.at(-1).name, 'toxicgozen-skills');
+    assert.equal(providers.filter((provider) => provider.name === 'work').length, 1);
     assert.deepEqual(JSON.parse(await readFile(storePath, 'utf8')).removed, []);
 
     const removed = await call('remove work');

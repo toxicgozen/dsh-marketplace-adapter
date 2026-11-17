@@ -1,43 +1,25 @@
-/**
- * Downstream DSH adapter for a namespaced agent-plugin repository.
- *
- * The repository keeps its own layout (`plugins/<plugin>/skills/<skill>/SKILL.md`)
- * shared with Codex, Cursor, Claude Code and Pi. DSH's bundled filesystem
- * provider cannot read that layout: its roots are static, it scans one level
- * deep, and it takes a skill's identity from the frontmatter `name`, so it has
- * no notion of the owning plugin.
- *
- * This plugin closes the gap without touching the repository. It maintains a
- * Git mirror of the repository and registers one `ctx.skills` provider over it,
- * so names can be namespaced while every relative reference inside a skill
- * (`references/…`, `../<sibling>/SKILL.md`, `../../playbooks/…`) still resolves
- * against the real directory tree.
- *
- * @module dsh-marketplace-adapter
- */
-
 import { readMarketplaceStore, readMarketplaceStoreSync, updateMarketplaceStore } from './store.js';
 import { ArchiveCache, sourceIdentity } from './archive.js';
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import z from '@deepseek-ai/schemastery';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { parseDocument, isMap } from 'yaml';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
-
 
 /** The public skill-name grammar enforced by `@deepseek-ai/dsh-skill`. */
 export const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const DEFAULT_PROVIDER = 'toxicgozen';
-const DEFAULT_REPOSITORY = 'https://github.com/toxicgozen/skills.git';
+const DEFAULT_REPOSITORY = 'https://github.com/toxicgozen/skills';
 const DEFAULT_REF = 'HEAD';
 const DEFAULT_RANK = 300;
-/** Wall-clock cadence for the refresh check; the check itself is cheap. */
+
 export const SYNC_TICK_MS = 15_000;
-/** First retry delay after a failed sync; doubles per consecutive failure. */
+
 export const RETRY_BASE_MS = 15_000;
-/** Upper bound for the retry delay so a recovered host refreshes within minutes. */
+
 export const RETRY_MAX_MS = 300_000;
-/** A lock this old belongs to a dead process and may be reclaimed. */
+
 /**
  * Frontmatter that other hosts act on but DSH ignores. Warning is the only
  * honest option: silently dropping them makes the same skill behave differently
@@ -68,15 +50,16 @@ const MarketplaceEntry = z.object({
   cachePath: z.string().description('Immutable archive cache directory'),
   ref: z.string(),
   namespace: z.union(NAMESPACES).description('Skill-name prefix policy for this source'),
-  mirrorPath: z.string().description('Working copy; defaults under the DSH home'),
+  mirrorPath: z.string().description('Read-only legacy clone; new cache uses a sibling .archives directory'),
+  descriptionPrefix: z.boolean(),
+  respectDisableModelInvocation: z.boolean(),
+  syncOnApply: z.boolean(),
+  syncIntervalMinutes: z.number(),
+  fetchTimeoutMs: z.number(),
+  plugins: z.object({ include: z.array(z.string()), exclude: z.array(z.string()) }),
   rank: z.number().description('Precedence among providers serving the same skill name'),
 });
 
-/**
- * The row's schema. Declaring it is what gives this bundle a settings form: the
- * Settings page renders these fields and writes them through the settings
- * service, so adding a marketplace never means hand-editing the profile patch.
- */
 export const Config = z.object({
   marketplaces: z.array(MarketplaceEntry).default([]).description('Sources to adapt side by side'),
   repository: z.string().default(DEFAULT_REPOSITORY).description('One source, when marketplaces is empty'),
@@ -89,7 +72,9 @@ export const Config = z.object({
   url: z.string().description('GitHub HTTPS repository or direct HTTPS tar.gz URL'),
   tokenEnv: z.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/).description('Credential environment variable name'),
   cachePath: z.string().description('Immutable archive cache directory'),
-  mirrorPath: z.string().description('Default working copy for sources without one'),
+  name: z.string().description('Stable name for the single source form'),
+  fetchTimeoutMs: z.number().default(180000).description('HTTP download timeout in milliseconds'),
+  mirrorPath: z.string().description('Read-only legacy clone; new cache uses a sibling .archives directory'),
   storePath: z.string().description('Where /marketplace add writes the sources it owns'),
   providerName: z.string().description('Provider name for the single repository form'),
   rank: z.number().default(DEFAULT_RANK),
@@ -99,11 +84,6 @@ export const Config = z.object({
   }).description('Keep or drop packages by name'),
 }).description('Adapts packaged skill marketplaces into DeepSeek Harness skills');
 
-/**
- * Marketplace manifests a packaged skill repository may ship. They declare the
- * packages and their directories, so a repository is not required to look like
- * `plugins/<package>`; the directory scan is only the fallback.
- */
 const MARKETPLACE_MANIFESTS = Object.freeze([
   '.claude-plugin/marketplace.json',
   '.cursor-plugin/marketplace.json',
@@ -112,14 +92,8 @@ const MARKETPLACE_MANIFESTS = Object.freeze([
 const TRUTHY = new Set(['true', 'yes', 'on', '1']);
 const FALSY = new Set(['false', 'no', 'off', '0']);
 
-/** Declare the one optional service this row cannot work without. */
 export const inject = ['skills'];
 
-/**
- * Host plugin entry point.
- * @param ctx - the row's Cordis context.
- * @param config - the row's `config` object; see {@link normalizeConfig}.
- */
 export function apply(ctx, config = {}) {
   const rawConfig = { ...config };
   const { marketplaces: declared } = normalizeBundleConfig(rawConfig);
@@ -150,11 +124,7 @@ export function apply(ctx, config = {}) {
     return state.providers;
   }
 
-  /**
-   * Rebuild the provider set from the declared entries plus the store the UI
-   * writes. A changed marketplace is a different provider, because the skill
-   * registry owns provider identity for the life of a registration.
-   */
+
   async function refresh() {
     const { marketplaces: stored, removed } = await readMarketplaceStore(storePath);
     const entries = mergeMarketplaceSources(declared, normalizeStored(stored), removed);
@@ -189,10 +159,6 @@ function storedEntriesSync(ctx, storePath, rawConfig) {
   }
 }
 
-/**
- * One operation for both callers: the composer command and the settings tab run
- * the same handler, so the UI never reimplements what the command does.
- */
 function registerMarketplaceCommand(ctx, state) {
   const commands = ctx.get('commands');
   if (commands === undefined) return;
@@ -203,29 +169,29 @@ function registerMarketplaceCommand(ctx, state) {
     input: { hint: '[sync [name] | add <owner/repo> [name] | remove <name>]' },
     async handler(invocation) {
       return state.enqueue(async () => {
-      const [action, first, second] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
+        const [action, first, second] = invocation.rawInput.trim().split(/\s+/).filter(Boolean);
 
-      try {
-        if (action === 'add') {
-          if (first === undefined) return { kind: 'error', text: 'usage: /marketplace add <owner/repo> [name]' };
-          return await addMarketplace(state, first, second);
-        }
-        if (action === 'remove') {
-          if (first === undefined) return { kind: 'error', text: 'usage: /marketplace remove <name>' };
-          return await removeMarketplace(state, first);
-        }
-        if (action === 'sync') {
-          const targets = first === undefined ? state.providers : state.providers.filter((provider) => provider.config.name === first);
-          if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${first}"` };
-          const results = await Promise.all(targets.map((provider) => provider.runSync()));
-          return { kind: results.every(Boolean) ? 'success' : 'error', text: await statusText(state) };
-        }
-        if (action !== undefined) return { kind: 'error', text: MARKETPLACE_USAGE };
+        try {
+          if (action === 'add') {
+            if (first === undefined) return { kind: 'error', text: 'usage: /marketplace add <owner/repo> [name]' };
+            return await addMarketplace(state, first, second);
+          }
+          if (action === 'remove') {
+            if (first === undefined) return { kind: 'error', text: 'usage: /marketplace remove <name>' };
+            return await removeMarketplace(state, first);
+          }
+          if (action === 'sync') {
+            const targets = first === undefined ? state.providers : state.providers.filter((provider) => provider.config.name === first);
+            if (targets.length === 0) return { kind: 'error', text: `marketplace: no marketplace named "${first}"` };
+            const results = await Promise.all(targets.map((provider) => provider.runSync()));
+            return { kind: results.every(Boolean) ? 'success' : 'error', text: await statusText(state) };
+          }
+          if (action !== undefined) return { kind: 'error', text: MARKETPLACE_USAGE };
 
-        return { kind: 'success', text: await statusText(state) };
-      } catch (error) {
-        return { kind: 'error', text: `marketplace: ${message(error)}` };
-      }
+          return { kind: 'success', text: await statusText(state) };
+        } catch (error) {
+          return { kind: 'error', text: `marketplace: ${message(error)}` };
+        }
       });
     },
   });
@@ -249,7 +215,7 @@ async function addMarketplace(state, url, name) {
     const removed = store.removed.includes(normalized.name);
     if ((declared || exists) && !removed) return { kind: 'error', text: `marketplace: "${normalized.name}" already exists`, changed: false };
     store.removed = store.removed.filter((entry) => entry !== normalized.name);
-    if (!declared && !exists) store.marketplaces.push({ name: normalized.name, url: normalized.url, ref: normalized.ref });
+    if (!declared && !exists) store.marketplaces.push({ name: normalized.name, url: normalized.url });
     return { kind: 'success', text: `${removed ? 'restored' : 'added'} ${normalized.name}` };
   });
   if (result.kind === 'error') return result;
@@ -278,7 +244,7 @@ function renderMarketplace(provider, packages, complete) {
     `marketplace  ${config.name}  ${config.repository}@${config.ref}`,
     `revision     ${state.revision ?? 'not synced yet'}`,
     `last sync    ${state.lastSuccessAt === 0 ? 'never' : new Date(state.lastSuccessAt).toLocaleString()}`,
-    `packages     ${packages.length}${complete ? '' : ' (mirror missing)'}`,
+    `packages     ${packages.length}${complete ? '' : ' (snapshot missing)'}`,
   ];
   if (state.lastError !== undefined) lines.push(`last error   ${state.lastError}`);
 
@@ -293,20 +259,8 @@ function renderMarketplace(provider, packages, complete) {
   return lines.join('\n');
 }
 
-/* -------------------------------------------------------------------------- */
-/* Client page                                                                */
-/* -------------------------------------------------------------------------- */
-
-/** Exact Fetch route the Client page reads; mounted under the Web carrier's shared `/api` channel. */
 export const STATUS_PATH = '/api/marketplace-adapter/status';
 
-/**
- * Serve the page's read model to the browser. The page is a plain global panel,
- * so it reads one JSON snapshot instead of a Remote service: this row has no
- * generated Typert contract, and a GET route keeps the client half dependency-free.
- * @param ctx - the row's Cordis context.
- * @param state - the row's mounted providers and the declarations behind them.
- */
 function registerStatusRoute(ctx, state) {
   if (typeof ctx.inject !== 'function') return;
   ctx.inject(['connection'], (scope) => {
@@ -332,13 +286,6 @@ function registerStatusRoute(ctx, state) {
   });
 }
 
-/**
- * Build the JSON the Client page renders. A failing marketplace is reported in
- * place with its reason instead of failing the whole snapshot, so one broken
- * mirror never hides the healthy ones.
- * @param state - the row's mounted providers and the declarations behind them.
- * @returns the snapshot the page's fetch returns.
- */
 export async function describeMarketplaces(state) {
   const marketplaces = [];
 
@@ -375,15 +322,6 @@ export async function describeMarketplaces(state) {
   return { updatedAt: new Date().toISOString(), marketplaces };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Configuration                                                              */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Validate and default one row of `config`.
- * @param raw - the loader-supplied configuration object.
- * @returns the normalized configuration used everywhere else.
- */
 export function normalizeConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new TypeError('marketplace-adapter: config must be an object');
@@ -426,26 +364,11 @@ export function normalizeConfig(raw = {}) {
   };
 }
 
-/**
- * Accept the `owner/repo` shorthand a marketplace URL field uses, and leave any
- * other value untouched so SSH and self-hosted URLs still work.
- * @param value - the configured repository.
- * @returns a Git URL.
- */export function normalizeRepository(value) {
+export function normalizeRepository(value) {
   const text = String(value).trim();
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text) ? `https://github.com/${text}` : text;
 }
 
-/**
- * Resolve the bundle-level configuration into one entry per marketplace.
- *
- * `marketplaces` declares several sources side by side; a flat `repository` is
- * still accepted and becomes the single entry. Shared fields act as defaults for
- * every entry, while `mirrorPath` and `providerName` stay per-entry so two
- * marketplaces never share a working copy or a registry name.
- * @param raw - the loader-supplied configuration object.
- * @returns `{ marketplaces }`, each a normalized entry carrying `name` and `providerName`.
- */
 export function normalizeBundleConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new TypeError('marketplace-adapter: config must be an object');
@@ -454,7 +377,7 @@ export function normalizeBundleConfig(raw = {}) {
   const declared = raw.marketplaces;
   if (declared === undefined || (Array.isArray(declared) && declared.length === 0)) {
     const single = normalizeConfig(raw);
-    const name = marketplaceName(single.repository);
+    const name = optionalString(raw.name) ?? marketplaceName(single.repository);
     return { marketplaces: [{ ...single, name, providerName: optionalString(raw.providerName) ?? name }] };
   }
   if (!Array.isArray(declared) || declared.length === 0) {
@@ -462,7 +385,7 @@ export function normalizeBundleConfig(raw = {}) {
   }
 
   const shared = { ...raw };
-  for (const key of ['marketplaces', 'url', 'repository', 'name', 'mirrorPath', 'cachePath', 'providerName']) delete shared[key];
+  for (const key of ['marketplaces', 'url', 'repository', 'name', 'mirrorPath', 'providerName']) delete shared[key];
 
   const seen = new Set();
   const marketplaces = declared.map((entry, index) => {
@@ -488,7 +411,6 @@ export function normalizeBundleConfig(raw = {}) {
   return { marketplaces };
 }
 
-/** `<owner>-<repo>` from a Git URL; the stable id shown in `/marketplace`. */
 function marketplaceName(repository) {
   const tail = String(repository)
     .replace(/[\\/]+$/, '')
@@ -537,12 +459,6 @@ function optionalNumber(value, fallback, minimum) {
   return value;
 }
 
-/**
- * `$DSH_HOME/skill-mirrors/<owner>-<repo>` — inside the DSH home so no other
- * agent harness ever reads it.
- * @param repository - the configured Git repository.
- * @returns the default mirror directory.
- */
 export function defaultMirrorPath(repository) {
   const home = optionalString(process.env.DSH_HOME) ?? join(homedir(), '.dsh');
   const tail = String(repository)
@@ -556,21 +472,11 @@ export function defaultMirrorPath(repository) {
   return join(home, 'skill-mirrors', slug === '' ? 'skills' : slug);
 }
 
-/**
- * `$DSH_HOME/marketplace-adapter/marketplaces.json` — the list the settings UI
- * owns. It is separate from the profile patch: that file belongs to the user and
- * other bundles, and a plugin must not rewrite it to store its own data.
- * @returns the default store path.
- */
 export function defaultStorePath() {
   const home = optionalString(process.env.DSH_HOME) ?? join(homedir(), '.dsh');
   return join(home, 'marketplace-adapter', 'marketplaces.json');
 }
 
-/**
- * Declared entries win over stored ones, and a tombstone removes a declared
- * entry without editing the profile patch: that file belongs to the user.
- */
 export function mergeMarketplaceSources(declared, stored, removed = []) {
   const dropped = new Set(removed);
   const names = new Set();
@@ -588,45 +494,23 @@ export function mergeMarketplaceSources(declared, stored, removed = []) {
   return merged;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Git mirror                                                                 */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Owns the read-only Git working copy the provider serves skills from.
- *
- * It is a normal shallow clone, not a bare `--mirror` repository: the provider
- * needs a real working tree so skill resources keep their relative layout.
- * Nothing here commits, pushes, or writes into the checkout beyond `reset`.
- */
-/** Delay before the next attempt after `failures` consecutive sync failures. */
 export function backoffDelayMs(failures) {
   const exponent = Math.max(0, Math.min(failures - 1, 5));
   return Math.min(RETRY_BASE_MS * 2 ** exponent, RETRY_MAX_MS);
 }
 
-/**
- * When the next refresh attempt is due.
- * @returns an epoch timestamp, `0` for "now", or `Infinity` when scheduling is off.
- */
 export function syncDueAt(state, config) {
   if (!config.syncOnApply) return Infinity;
   if (!(state.lastAttemptAt > 0)) return 0;
   if (!(config.syncIntervalMinutes > 0)) return Infinity;
   if (state.consecutiveFailures > 0) return state.lastAttemptAt + backoffDelayMs(state.consecutiveFailures);
-  if (!(config.syncIntervalMinutes > 0)) return Infinity;
   return state.lastAttemptAt + config.syncIntervalMinutes * 60_000;
 }
 
-/** Whether a refresh may start now. */
 export function shouldSync(state, config, now) {
   if (state.running !== undefined) return false;
   return now >= syncDueAt(state, config);
 }
-
-/* -------------------------------------------------------------------------- */
-/* Provider                                                                   */
-/* -------------------------------------------------------------------------- */
 
 export class MarketplaceAdapterProvider {
   constructor(ctx, config, control, deps = {}) {
@@ -680,11 +564,7 @@ export class MarketplaceAdapterProvider {
     }
   }
 
-  /**
-   * `ctx.skills` provider discovery.
-   * @param options - lookup options; only `signal` is used.
-   * @returns candidate summaries, or an incomplete observation before the mirror exists.
-   */
+
   async list(options = {}) {
     this.runSyncIfDue();
     return collectSkillCandidates(this.config, {
@@ -694,12 +574,7 @@ export class MarketplaceAdapterProvider {
     });
   }
 
-  /**
-   * Load one skill body from disk. Bodies are never cached, so an edit is
-   * visible on the next load without a catalog change.
-   * @param candidate - a candidate previously returned by {@link list}.
-   * @returns the same summary plus the current body, or `undefined` if it vanished.
-   */
+
   async get(candidate) {
     const file = typeof candidate.locator?.file === 'string' ? candidate.locator.file : candidate.path;
     if (typeof file !== 'string') return undefined;
@@ -710,7 +585,7 @@ export class MarketplaceAdapterProvider {
       if (isAbsent(error)) return undefined;
       throw error;
     }
-    const parsed = parseSkillDocument(text, candidate.locator?.baseName);
+    const parsed = parseSkill(text, candidate.locator?.baseName);
     if (!parsed.ok) return undefined;
     return { ...candidate, content: parsed.skill.body };
   }
@@ -764,16 +639,6 @@ export class MarketplaceAdapterProvider {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Discovery                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Scan a mirror for skill packages and their `skills/<skill>/SKILL.md` entries.
- * @param config - a normalized configuration.
- * @param hooks - optional provider label, abort signal and warning sink.
- * @returns `{ candidates, complete }`; incomplete until the mirror first exists.
- */
 export async function collectSkillCandidates(config, hooks = {}) {
   const provider = hooks.provider ?? config.providerName;
   const signal = hooks.signal;
@@ -788,26 +653,16 @@ export async function collectSkillCandidates(config, hooks = {}) {
     const plugin = item.name;
     const pluginDir = item.dir;
     const manifest = await readPluginManifest(pluginDir);
-    const skillsDir = join(pluginDir, 'skills');
-
-    let skillEntries;
-    try {
-      skillEntries = await readdir(skillsDir, { withFileTypes: true });
-    } catch (error) {
-      if (isAbsent(error)) {
-        onWarning(`plugin "${plugin}" has no skills directory`);
-        continue;
-      }
-      throw error;
+    let skillDirs = item.skills;
+    if (skillDirs === undefined) {
+      const skillsDir = join(pluginDir, 'skills');
+      let entries;
+      try { entries = await readdir(skillsDir, { withFileTypes: true }); }
+      catch (error) { if (isAbsent(error)) { onWarning(`plugin "${plugin}" has no skills directory`); continue; } throw error; }
+      skillDirs = entries.filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => join(skillsDir, entry.name)).sort();
     }
-
-    const skillNames = skillEntries
-      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-      .map((entry) => entry.name)
-      .sort();
-
-    for (const entry of skillNames) {
-      const skillDir = join(skillsDir, entry);
+    for (const skillDir of skillDirs) {
+      const entry = basename(skillDir);
       const file = join(skillDir, 'SKILL.md');
       let text;
       try {
@@ -816,7 +671,7 @@ export async function collectSkillCandidates(config, hooks = {}) {
         if (isAbsent(error)) continue;
         throw error;
       }
-      const parsed = parseSkillDocument(text);
+      const parsed = parseSkill(text, entry);
       if (!parsed.ok) {
         onWarning(`${plugin}/skills/${entry}/SKILL.md ignored: ${parsed.reason}`);
         continue;
@@ -872,12 +727,6 @@ export async function collectSkillCandidates(config, hooks = {}) {
   return { candidates, complete };
 }
 
-/**
- * Packages declared by a marketplace manifest, or the `plugins/` directory when
- * the repository ships none. A manifest that cannot be used warns and falls back,
- * so a broken manifest never empties the catalog.
- * @returns `{ packages, complete }`; incomplete only when the mirror is absent.
- */
 async function listPackages(config, onWarning) {
   const declared = await packagesFromMarketplace(config, onWarning);
   if (declared !== undefined) return { packages: declared, complete: true };
@@ -909,6 +758,10 @@ async function packagesFromMarketplace(config, onWarning) {
     const packages = [];
     for (const entry of manifest.plugins) {
       const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+      if (entry?.source && typeof entry.source === 'object' && entry.source.source !== undefined && entry.source.source !== 'local') {
+        onWarning(`${relativePath}: package "${name}" has unsupported source "${entry.source.source}"; ignored`);
+        continue;
+      }
       const source = typeof entry?.source === 'string' ? entry.source : entry?.source?.path;
       const path = typeof source === 'string' ? source.trim() : '';
       if (name === '' || path === '') {
@@ -920,7 +773,19 @@ async function packagesFromMarketplace(config, onWarning) {
         onWarning(`${relativePath}: package "${name}" points outside the mirror; ignored`);
         continue;
       }
-      packages.push({ name, dir });
+      let skills;
+      if (entry.skills !== undefined) {
+        if (!Array.isArray(entry.skills) || entry.skills.some((path) => typeof path !== 'string')) {
+          onWarning(`${relativePath}: package "${name}" has invalid skills directories; ignored`);
+          continue;
+        }
+        skills = entry.skills.map((path) => resolve(dir, path)).filter((path) => {
+          if (isInside(dir, path)) return true;
+          onWarning(`${relativePath}: package "${name}" skill points outside its root; ignored`);
+          return false;
+        });
+      }
+      packages.push({ name, dir, ...(skills === undefined ? {} : { skills }) });
     }
 
     return packages.sort((left, right) => left.name.localeCompare(right.name)).filter((item) => isSelected(config, item.name));
@@ -951,16 +816,9 @@ async function packagesFromPluginsDir(config) {
 
 function isInside(root, target) {
   const path = relative(root, target);
-  return path !== '' && !path.startsWith('..') && !isAbsolute(path);
+  return (path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))) && !isAbsolute(path);
 }
 
-/**
- * Read-only snapshot for `/marketplace`: each package's name, version and skill
- * count, plus whether the mirror could be read at all.
- * @param config - a normalized configuration.
- * @param onWarning - sink for unreadable manifests or directories.
- * @returns `{ packages, complete }`.
- */
 export async function describeMarketplace(config, onWarning = () => {}) {
   const { packages, complete } = await listPackages(config, onWarning);
   const rows = [];
@@ -969,7 +827,7 @@ export async function describeMarketplace(config, onWarning = () => {}) {
     rows.push({
       name: item.name,
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
-      skills: await countSkills(join(item.dir, 'skills')),
+      skills: item.skills === undefined ? await countSkills(join(item.dir, 'skills')) : item.skills.length,
     });
   }
   return { packages: rows, complete };
@@ -1005,29 +863,24 @@ function slug(value) {
 }
 
 async function readPluginManifest(pluginDir) {
-  try {
-    const parsed = JSON.parse(await readFile(join(pluginDir, 'plugin.json'), 'utf8'));
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
+  for (const file of ['.codex-plugin/plugin.json', '.claude-plugin/plugin.json', '.cursor-plugin/plugin.json', 'plugin.json']) {
+    try {
+      const parsed = JSON.parse(await readFile(join(pluginDir, file), 'utf8'));
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch (error) { if (!isAbsent(error) && !(error instanceof SyntaxError)) throw error; }
   }
+  return undefined;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Skill document parsing                                                     */
-/* -------------------------------------------------------------------------- */
+export function parseSkillDocument(text) { return parseSkill(text); }
 
-/**
- * Parse one `SKILL.md` and resolve DSH's invocation policy from its frontmatter.
- * @param text - the raw file contents.
- * @returns a discriminated result; `reason` explains a skipped file.
- */
-export function parseSkillDocument(text) {
+function parseSkill(text, fallbackName) {
   const frontmatter = parseFrontmatter(text);
   if (frontmatter === undefined) return { ok: false, reason: 'missing YAML frontmatter' };
 
+  if (frontmatter.diagnostics.length) return { ok: false, reason: `invalid YAML: ${frontmatter.diagnostics.join('; ')}` };
   const data = frontmatter.data;
-  const name = stringField(data, 'name');
+  const name = Object.hasOwn(data, 'name') ? stringField(data, 'name') : fallbackName;
   const description = stringField(data, 'description');
   if (name === undefined) return { ok: false, reason: 'frontmatter requires a name' };
   if (description === undefined) return { ok: false, reason: 'frontmatter requires a description' };
@@ -1060,11 +913,6 @@ export function parseSkillDocument(text) {
   };
 }
 
-/**
- * Split a Markdown file into its YAML frontmatter map and body.
- * @param text - the raw file contents.
- * @returns the parsed map and body, or `undefined` when the file has no frontmatter.
- */
 export function parseFrontmatter(text) {
   const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const lines = source.split(/\r?\n/);
@@ -1080,87 +928,14 @@ export function parseFrontmatter(text) {
   }
   if (close === -1) return undefined;
 
-  return {
-    data: parseYamlSubset(lines.slice(1, close)),
-    body: lines.slice(close + 1).join('\n').trim(),
-  };
-}
-
-/**
- * A deliberately small YAML subset: top-level `key: value` scalars plus `|`/`>`
- * block scalars. Nested maps are ignored — DSH only reads scalar frontmatter.
- */
-function parseYamlSubset(lines) {
-  const data = {};
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
-    if (/^\s/.test(line)) continue;
-
-    const match = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(line);
-    if (match === null) continue;
-
-    const key = match[1];
-    const rest = match[2];
-    const block = /^([|>])([+-]?)\s*$/.exec(rest);
-    if (block === null) {
-      data[key] = parseScalar(rest);
-      continue;
-    }
-
-    const collected = [];
-    let cursor = index + 1;
-    for (; cursor < lines.length; cursor += 1) {
-      const next = lines[cursor];
-      if (next.trim() === '') {
-        collected.push('');
-        continue;
-      }
-      if (!/^\s/.test(next)) break;
-      collected.push(next.startsWith('  ') ? next.slice(2) : next.trimStart());
-    }
-    index = cursor - 1;
-
-    let value = collected.join(block[1] === '|' ? '\n' : ' ');
-    if (block[2] !== '-') value = value.replace(/\n+$/, '');
-    data[key] = value;
+  const document = parseDocument(lines.slice(1, close).join('\n'), { uniqueKeys: true });
+  const diagnostics = document.errors.map((error) => error.message);
+  let data = {};
+  if (!isMap(document.contents)) diagnostics.push('frontmatter requires a YAML mapping');
+  if (!diagnostics.length) {
+    try { data = document.toJS({ maxAliasCount: 100 }); } catch (error) { diagnostics.push(message(error)); }
   }
-  return data;
-}
-
-function parseScalar(text) {
-  const value = text.trim();
-  if (value === '') return '';
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return unescapeDoubleQuoted(value.slice(1, -1));
-  }
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1).replaceAll("''", "'");
-  }
-  if (value === 'true' || value === 'True' || value === 'TRUE') return true;
-  if (value === 'false' || value === 'False' || value === 'FALSE') return false;
-  if (value === 'null' || value === 'Null' || value === 'NULL' || value === '~') return null;
-  if (/^-?(?:0|[1-9][0-9]*)$/.test(value)) return Number(value);
-  return value;
-}
-
-function unescapeDoubleQuoted(value) {
-  let output = '';
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (character !== '\\') {
-      output += character;
-      continue;
-    }
-    index += 1;
-    const next = value[index];
-    if (next === undefined) break;
-    if (next === 'n') output += '\n';
-    else if (next === 't') output += '\t';
-    else if (next === 'r') output += '\r';
-    else output += next;
-  }
-  return output;
+  return { data, diagnostics, body: lines.slice(close + 1).join('\n').trim() };
 }
 
 function readToggle(value, key) {
@@ -1185,25 +960,8 @@ function stringField(data, key) {
   return trimmed === '' ? undefined : trimmed;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Small helpers                                                              */
-/* -------------------------------------------------------------------------- */
-
 function isAbsent(error) {
   return error?.code === 'ENOENT' || error?.code === 'ENOTDIR';
-}
-
-function isAbsentExecutable(error) {
-  return error?.code === 'ENOENT' || error?.code === 'EACCES';
-}
-
-async function pathExists(path) {
-  try {
-    await readdir(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function message(error) {
@@ -1213,6 +971,3 @@ function message(error) {
     return '[unrenderable error]';
   }
 }
-
-/** Exported for tests only; not part of the plugin's runtime contract. */
-export const __internals = Object.freeze({ parseYamlSubset, readToggle, slug, pathExists });
