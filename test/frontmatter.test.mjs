@@ -1,7 +1,31 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseFrontmatter, parseSkillDocument, normalizeConfig, defaultMirrorPath } from '../index.js';
+import { parseFrontmatter, parseSkillDocument, normalizeConfig } from '../index.js';
+
+test('indented YAML separators remain in the description and preserve following invocation fields', () => {
+  for (const separator of ['---', '...']) {
+    const parsed = parseSkillDocument(`---\nname: alpha\ndescription: |\n  First line.\n  ${separator}\n  Last line.\nuser-invocable: false\n---  \nBody.`);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.skill.invocation.userInvocable, false);
+    assert.equal(parsed.skill.description, `First line.\n${separator}\nLast line.`);
+    assert.equal(parsed.skill.body, 'Body.');
+  }
+});
+
+test('uses complete YAML semantics and reports malformed documents', () => {
+  const parsed = parseSkillDocument('---\nname: alpha # comment\ndescription: >-\n  first line\n  second line\nwhenToUse: "\\u4e2d\\u6587"\npaths:\n  - "**/*.ts"\n---\nBody.');
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.skill.name, 'alpha');
+  assert.equal(parsed.skill.description, 'first line second line');
+  assert.equal(parsed.skill.whenToUse, '中文');
+  for (const yaml of ['name: alpha\nname: beta\ndescription: A.', 'name: alpha\ndescription: [broken', '[one, two]']) {
+    const invalid = parseSkillDocument(`---\n${yaml}\n---\n`);
+    assert.equal(invalid.ok, false);
+    assert.match(invalid.reason, /YAML|mapping/);
+  }
+});
 
 test('parses a plain frontmatter block and trims the body', () => {
   const parsed = parseFrontmatter('---\nname: ticktick-organize-tasks\ndescription: Organize tasks.\n---\n\n# Heading\n\nBody text.\n');
@@ -28,7 +52,7 @@ test('unescapes single quotes and double quotes', () => {
 
 test('supports folded block scalars', () => {
   const parsed = parseFrontmatter('---\nname: alpha\ndescription: >\n  first line\n  second line\n---\nBody.\n');
-  assert.equal(parsed.data.description, 'first line second line');
+  assert.equal(parsed.data.description, 'first line second line\n');
 });
 
 test('returns undefined without frontmatter', () => {
@@ -82,15 +106,10 @@ test('carries whenToUse through', () => {
   assert.equal(result.skill.whenToUse, 'When writing tests.');
 });
 
-test('defaults the mirror inside DSH_HOME', () => {
-  const previous = process.env.DSH_HOME;
-  process.env.DSH_HOME = 'C:\\Users\\example\\.dsh';
-  try {
-    assert.match(defaultMirrorPath('https://github.com/toxicgozen/skills.git'), /skill-mirrors[\\/]toxicgozen-skills$/);
-  } finally {
-    if (previous === undefined) delete process.env.DSH_HOME;
-    else process.env.DSH_HOME = previous;
-  }
+test('legacy roots are opt-in and new cache roots are independent', () => {
+  const config = normalizeConfig({ url: 'example/skills' });
+  assert.equal(config.mirrorPath, undefined);
+  assert.match(config.cachePath, /marketplace-adapter[\\/]snapshots$/);
 });
 
 test('rejects an unknown namespace and the reserved provider name', () => {

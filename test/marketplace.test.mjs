@@ -1,8 +1,21 @@
+import './setup.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parseDocument } from 'yaml';
+
+test('the shipped bundle selects HTTP URL and the remote default branch through Config', async () => {
+  const patch = parseDocument(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')).toJS();
+  const raw = patch[0].insert[0].config;
+  assert.equal(raw.url, 'https://github.com/toxicgozen/skills');
+  assert.equal(raw.sslBackend, undefined);
+  const source = normalizeBundleConfig(Config(raw)).marketplaces[0];
+  assert.equal(source.url, raw.url);
+  assert.equal(source.ref, 'HEAD');
+  assert.equal(source.mirrorPath, undefined);
+});
 
 import { Config, collectSkillCandidates, normalizeBundleConfig, normalizeConfig, normalizeRepository } from '../index.js';
 
@@ -23,11 +36,38 @@ async function manifest(root, relativePath, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+test('schema item ref inherits the shared ref and only then defaults to HEAD', () => {
+  const raw = Config({ ref: 'release', marketplaces: [{ url: 'example/one' }] });
+  assert.equal(raw.marketplaces[0].ref, undefined);
+  assert.equal(normalizeBundleConfig(raw).marketplaces[0].ref, 'release');
+  assert.throws(() => Config({ tokenEnv: 'invalid-name' }));
+});
+
+test('root packages select their own skill directories and discovery alone may fall back to directory name', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-marketplace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writePackage(root, '.', 'one');
+  await writePackage(root, '.', 'two');
+  await writeFile(join(root, 'skills/one/SKILL.md'), '---\ndescription: Directory fallback.\n---\nBody.');
+  await manifest(root, '.codex-plugin/plugin.json', { version: '2.0' });
+  await manifest(root, '.claude-plugin/marketplace.json', { plugins: [
+    { name: 'first', source: './', skills: ['./skills/one'] },
+    { name: 'second', source: { source: 'local', path: './' }, skills: ['./skills/two'] },
+    { name: 'remote', source: { source: 'url', path: './' } },
+    { name: 'git', source: { source: 'git-subdir', path: './' } },
+  ] });
+  const warnings = [];
+  const { candidates } = await collectSkillCandidates(config(root), { onWarning: (text) => warnings.push(text) });
+  assert.deepEqual(candidates.map((x) => x.name), ['first-one', 'second-two']);
+  assert.equal(candidates[0].metadata.version, '2.0');
+  assert.equal(warnings.filter((x) => /unsupported/.test(x)).length, 2);
+});
+
 test('the owner/repo shorthand becomes a GitHub URL and other values stay untouched', () => {
-  assert.equal(normalizeRepository('toxicgozen/skills'), 'https://github.com/toxicgozen/skills.git');
+  assert.equal(normalizeRepository('toxicgozen/skills'), 'https://github.com/toxicgozen/skills');
   assert.equal(normalizeRepository('https://gitlab.example.com/team/skills.git'), 'https://gitlab.example.com/team/skills.git');
   assert.equal(normalizeRepository('git@github.com:toxicgozen/skills.git'), 'git@github.com:toxicgozen/skills.git');
-  assert.equal(normalizeConfig({ repository: 'toxicgozen/skills' }).repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(normalizeConfig({ repository: 'toxicgozen/skills' }).repository, 'https://github.com/toxicgozen/skills');
 });
 
 test('a marketplace manifest decides the package list and its directories', async () => {
@@ -112,13 +152,13 @@ test('a flat repository becomes one named marketplace and shared fields reach ea
   assert.equal(single.length, 1);
   assert.equal(single[0].name, 'toxicgozen-skills');
   assert.equal(single[0].providerName, 'toxicgozen-skills');
-  assert.equal(single[0].repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(single[0].repository, 'https://github.com/toxicgozen/skills');
 
   const many = normalizeBundleConfig({
     namespace: 'none',
     marketplaces: [
       { repository: 'toxicgozen/skills' },
-      { name: 'work', repository: 'https://git.example.com/team/skills.git', ref: 'release' },
+      { name: 'work', repository: 'https://git.example.com/team/skills.tar.gz', ref: 'release' },
     ],
   }).marketplaces;
 
@@ -126,7 +166,9 @@ test('a flat repository becomes one named marketplace and shared fields reach ea
   assert.equal(many[0].namespace, 'none', 'shared defaults reach each entry');
   assert.equal(many[1].ref, 'release');
   assert.equal(many[1].providerName, 'work');
-  assert.notEqual(many[0].mirrorPath, many[1].mirrorPath, 'each marketplace owns its working copy');
+  assert.equal(many[0].mirrorPath, undefined);
+  assert.equal(many[1].mirrorPath, undefined);
+  assert.equal(many[0].cachePath, many[1].cachePath, 'source identities isolate snapshots under the shared cache root');
 });
 
 test('invalid marketplace declarations are rejected before anything starts', () => {
@@ -148,10 +190,10 @@ test('invalid marketplace declarations are rejected before anything starts', () 
 
 test('the row schema defaults every field the settings form renders', () => {
   const value = Config({ marketplaces: [{ repository: 'owner/repo' }] });
-  assert.equal(value.marketplaces[0].ref, 'main');
+  assert.equal(value.marketplaces[0].ref, undefined);
   assert.equal(value.namespace, 'plugin');
   assert.deepEqual(value.marketplaces[0].namespace, undefined);
   assert.equal(value.syncIntervalMinutes, 60);
-  assert.equal(value.repository, 'https://github.com/toxicgozen/skills.git');
+  assert.equal(value.repository, 'https://github.com/toxicgozen/skills');
   assert.throws(() => Config({ namespace: 'bogus' }));
 });

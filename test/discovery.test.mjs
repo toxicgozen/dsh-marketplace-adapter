@@ -1,10 +1,28 @@
+import './setup.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { collectSkillCandidates, normalizeConfig } from '../index.js';
+import { collectSkillCandidates, MarketplaceAdapterProvider, normalizeConfig } from '../index.js';
+
+test('a source without its own snapshot cannot read an automatically inferred legacy clone', async (t) => {
+  const legacy = join(process.env.DSH_HOME, 'skill-mirrors', 'example-skills');
+  const skill = join(legacy, 'plugins', 'old', 'skills', 'main-only');
+  await mkdir(skill, { recursive: true });
+  await writeFile(join(skill, 'SKILL.md'), '---\nname: main-only\ndescription: Main branch content.\n---\nBody.');
+  for (const ref of ['develop', 'release']) {
+    const config = normalizeConfig({ url: 'example/skills', ref, syncOnApply: false });
+    const provider = new MarketplaceAdapterProvider({ logger: { info() {}, warn() {} } }, config, { signal: new AbortController().signal, invalidate() {} });
+    t.after(() => provider.dispose());
+    assert.deepEqual(await provider.list(), { candidates: [], complete: false });
+  }
+  const explicit = normalizeConfig({ url: 'example/skills', ref: 'release', mirrorPath: legacy, syncOnApply: false });
+  const observation = await collectSkillCandidates(explicit);
+  assert.equal(observation.complete, true);
+  assert.deepEqual(observation.candidates.map((candidate) => candidate.name), ['old-main-only']);
+});
 
 const SKILL = (name, description, extra = '') => `---\nname: ${name}\ndescription: ${description}\n${extra}---\n\n# ${name}\n`;
 
